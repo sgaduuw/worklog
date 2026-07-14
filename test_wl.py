@@ -1,12 +1,27 @@
 """Self-checks for worklog.py. Run: python3 test_wl.py"""
 import io
 import os
-import sys
 import tempfile
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime
 
 import worklog as wl
+
+
+@contextmanager
+def worklog_root():
+    """Point wl at a throwaway root (via WORKLOG_ROOT) for the duration of a test."""
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            yield d
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+class _NS:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
 
 
 def test_resolve_at():
@@ -85,204 +100,16 @@ def test_roundtrip_idempotent():
     assert once == twice, f"render not a fixed point:\n--- once ---\n{once}\n--- twice ---\n{twice}"
 
 
-def test_import_and_stale_reimport():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            md = os.path.join(d, "work_log.md")
-            with open(md, "w") as f:
-                f.write(
-                    "# Work Log\n\n## 2026-06-30\n\n### general\n"
-                    "- 09:15 [note] first entry (refs: none)\n"
-                )
-            conn = wl.connect()                       # DB missing -> imports md
-            rows = wl._all_entries(conn)
-            assert len(rows) == 1 and rows[0].body == "first entry", rows
-            conn.close()
-
-            # hand-edit the markdown so it is newer than the DB
-            import time
-            time.sleep(0.05)
-            with open(md, "a") as f:
-                f.write("- 10:00 [note] second entry (refs: none)\n")
-            conn = wl.connect()                       # md newer -> re-imports
-            rows = wl._all_entries(conn)
-            assert len(rows) == 2, rows
-            conn.close()
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-class _NS:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-
-def test_add_and_report():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-1, PROJ-2",
-                           at="2026-06-30T09:00", body="hello world"))
-            text = open(os.path.join(d, "work_log.md")).read()
-            assert "## 2026-06-30" in text
-            assert "- 09:00 [note] hello world (refs: PROJ-1, PROJ-2)" in text
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                wl.cmd_report(_NS(day="2026-06-30", since=None, until=None))
-            assert "### general" in buf.getvalue()
-            assert "09:00 [note] hello world" in buf.getvalue()
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-def test_log_filters():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-1",
-                           at="2026-06-30T09:00", body="alpha"))
-            wl.cmd_add(_NS(slug="backend", type="pr", ref="PROJ-2",
-                           at="2026-06-30T10:00", body="beta"))
-            wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-10",
-                           at="2026-07-01T09:00", body="gamma"))
-
-            def run(**kw):
-                base = dict(slug=None, type=None, ref=None, since=None, until=None)
-                base.update(kw)
-                buf = io.StringIO()
-                with redirect_stdout(buf):
-                    wl.cmd_log(_NS(**base))
-                return buf.getvalue()
-
-            out = run(slug="backend")
-            assert "beta" in out and "alpha" not in out and "gamma" not in out
-
-            # type filter (only 'beta' is a pr)
-            out = run(type="pr")
-            assert "beta" in out and "alpha" not in out and "gamma" not in out
-
-            # combined filters are ANDed
-            out = run(slug="general", type="note")
-            assert "alpha" in out and "gamma" in out and "beta" not in out
-
-            # ref matches per key, not raw substring: PROJ-1 must NOT match PROJ-10
-            out = run(ref="PROJ-1")
-            assert "alpha" in out and "gamma" not in out and "beta" not in out
-
-            # since is inclusive of its bound and excludes earlier days
-            out = run(since="2026-07-01")
-            assert "gamma" in out and "alpha" not in out and "beta" not in out
-            out = run(since="2026-06-30")
-            assert "alpha" in out and "beta" in out and "gamma" in out
-
-            # until is inclusive of its bound and excludes later days
-            out = run(until="2026-06-30")
-            assert "alpha" in out and "beta" in out and "gamma" not in out
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-def test_main_add():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                wl.main(["add", "--slug", "general", "--type", "pr",
-                         "--ref", "PROJ-9", "--at", "2026-06-30T12:00", "did a thing"])
-            assert "- 12:00 [pr] did a thing (refs: PROJ-9)" in buf.getvalue()
-            text = open(os.path.join(d, "work_log.md")).read()
-            assert "did a thing" in text
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-def test_validation_exits():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            for argv in (
-                ["add", "--slug", "general", "--type", "bogus", "x"],
-                ["add", "--slug", "general", "--type", "note", "--at", "5pm", "x"],
-            ):
-                try:
-                    wl.main(argv)
-                    assert False, f"expected SystemExit for {argv}"
-                except SystemExit as ex:
-                    assert ex.code not in (0, None), ex.code
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-def test_report_range():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            for at, body in (("2026-07-01T09:00", "day one"),
-                             ("2026-07-02T09:00", "day two"),
-                             ("2026-07-04T09:00", "day four")):
-                wl.cmd_add(_NS(slug="general", type="note", ref="", at=at, body=body))
-
-            def report(**kw):
-                base = dict(day="today", since=None, until=None)
-                base.update(kw)
-                buf = io.StringIO()
-                with redirect_stdout(buf):
-                    wl.cmd_report(_NS(**base))
-                return buf.getvalue()
-
-            # range spans multiple days, grouped newest-first, out-of-range excluded
-            out = report(since="2026-07-02", until="2026-07-04")
-            assert "day two" in out and "day four" in out and "day one" not in out
-            assert out.index("## 2026-07-04") < out.index("## 2026-07-02")  # newest first
-
-            # open-ended --since (no --until) reaches the latest day
-            out = report(since="2026-07-04")
-            assert "day four" in out and "day two" not in out
-
-            # empty range reports cleanly
-            assert "no entries" in report(since="2025-01-01", until="2025-12-31")
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-def test_slug_add_ls_rm():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            def run(*argv):
-                buf = io.StringIO()
-                with redirect_stdout(buf):
-                    wl.main(["slug", *argv])
-                return buf.getvalue()
-
-            assert run("ls").split() == ["general"]        # seeded default
-            run("add", "backend")
-            run("add", "infra")
-            assert run("ls").split() == ["general", "backend", "infra"]  # pos order
-
-            assert "already registered" in run("add", "backend")
-            assert run("ls").split() == ["general", "backend", "infra"]  # unchanged
-
-            run("rm", "backend")
-            assert run("ls").split() == ["general", "infra"]
-            assert "was not registered" in run("rm", "nope")
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-def test_known_slugs_order():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            conn = wl.connect()                            # seeds general at pos 0
-            conn.execute("INSERT INTO slugs(name, pos) VALUES('zeta', 5), ('alpha', 1)")
-            conn.commit()
-            assert wl.known_slugs(conn) == ["general", "alpha", "zeta"]  # by pos, not name
-            conn.close()
-        finally:
-            del os.environ["WORKLOG_ROOT"]
+def test_roundtrip_preserves_entries():
+    # render -> parse must return the entries intact, incl. awkward bodies
+    order = ["general"]
+    entries = [
+        wl.Entry("2026-07-01T09:00:00", "general", "note", "PROJ-1,PROJ-2",
+                 "colons: and [brackets] and a note-ish word in body"),
+        wl.Entry("2026-07-01T09:05:00", "general", "pr", "", "plain body"),
+    ]
+    got = wl.parse_markdown(wl.render_markdown(entries, order))
+    assert got == entries, got
 
 
 def test_render_custom_order():
@@ -297,88 +124,219 @@ def test_render_custom_order():
     assert out.index("### general") < out.index("### backend") < out.index("### infra")
 
 
-def test_add_unknown_slug_warns_but_logs():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            err = io.StringIO()
-            with redirect_stderr(err):
-                wl.main(["add", "--slug", "mystery", "--type", "note",
-                         "--at", "2026-07-01T09:00", "still logged"])
-            assert "unknown slug" in err.getvalue()          # typo guard fired
-            text = open(os.path.join(d, "work_log.md")).read()
-            assert "still logged" in text                    # entry written anyway
-        finally:
-            del os.environ["WORKLOG_ROOT"]
+def test_import_and_stale_reimport():
+    with worklog_root() as d:
+        md = os.path.join(d, "work_log.md")
+        with open(md, "w") as f:
+            f.write(
+                "# Work Log\n\n## 2026-06-30\n\n### general\n"
+                "- 09:15 [note] first entry (refs: none)\n"
+            )
+        conn = wl.connect()                       # DB missing -> imports md
+        rows = wl._all_entries(conn)
+        assert len(rows) == 1 and rows[0].body == "first entry", rows
+        conn.close()
+
+        # hand-edit the markdown so it is newer than the DB
+        import time
+        time.sleep(0.05)
+        with open(md, "a") as f:
+            f.write("- 10:00 [note] second entry (refs: none)\n")
+        conn = wl.connect()                       # md newer -> re-imports
+        rows = wl._all_entries(conn)
+        assert len(rows) == 2, rows
+        conn.close()
 
 
-def test_roundtrip_preserves_entries():
-    # render -> parse must return the entries intact, incl. awkward bodies
-    order = ["general"]
-    entries = [
-        wl.Entry("2026-07-01T09:00:00", "general", "note", "PROJ-1,PROJ-2",
-                 "colons: and [brackets] and a note-ish word in body"),
-        wl.Entry("2026-07-01T09:05:00", "general", "pr", "", "plain body"),
-    ]
-    got = wl.parse_markdown(wl.render_markdown(entries, order))
-    assert got == entries, got
-
-
-def test_report_empty_day():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                wl.cmd_report(_NS(day="2020-01-01", since=None, until=None))
-            assert "no entries" in buf.getvalue()
-        finally:
-            del os.environ["WORKLOG_ROOT"]
-
-
-def test_slug_rm_with_entries():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            wl.main(["slug", "add", "backend"])
-            wl.cmd_add(_NS(slug="backend", type="note", ref="",
-                           at="2026-07-01T09:00", body="x"))
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                wl.main(["slug", "rm", "backend"])
-            out = buf.getvalue()
-            assert "removed slug 'backend'" in out
-            assert "1 existing entries will now sort as unknown" in out
-        finally:
-            del os.environ["WORKLOG_ROOT"]
+def test_add_and_report():
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-1, PROJ-2",
+                       at="2026-06-30T09:00", body="hello world"))
+        text = open(os.path.join(d, "work_log.md")).read()
+        assert "## 2026-06-30" in text
+        assert "- 09:00 [note] hello world (refs: PROJ-1, PROJ-2)" in text
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_report(_NS(day="2026-06-30", since=None, until=None))
+        assert "### general" in buf.getvalue()
+        assert "09:00 [note] hello world" in buf.getvalue()
 
 
 def test_add_body_sanitized():
     # a multi-line body must collapse to one line, else it breaks the md line format
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            wl.cmd_add(_NS(slug="general", type="note", ref="",
-                           at="2026-07-01T09:00", body="  line one\nline two  "))
-            text = open(os.path.join(d, "work_log.md")).read()
-            # flattened to one line and stripped of surrounding whitespace
-            assert "- 09:00 [note] line one line two (refs: none)" in text
-        finally:
-            del os.environ["WORKLOG_ROOT"]
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="  line one\nline two  "))
+        text = open(os.path.join(d, "work_log.md")).read()
+        # flattened to one line and stripped of surrounding whitespace
+        assert "- 09:00 [note] line one line two (refs: none)" in text
+
+
+def test_log_filters():
+    with worklog_root():
+        wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-1",
+                       at="2026-06-30T09:00", body="alpha"))
+        wl.cmd_add(_NS(slug="backend", type="pr", ref="PROJ-2",
+                       at="2026-06-30T10:00", body="beta"))
+        wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-10",
+                       at="2026-07-01T09:00", body="gamma"))
+
+        def run(**kw):
+            base = dict(slug=None, type=None, ref=None, since=None, until=None)
+            base.update(kw)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.cmd_log(_NS(**base))
+            return buf.getvalue()
+
+        out = run(slug="backend")
+        assert "beta" in out and "alpha" not in out and "gamma" not in out
+
+        # type filter (only 'beta' is a pr)
+        out = run(type="pr")
+        assert "beta" in out and "alpha" not in out and "gamma" not in out
+
+        # combined filters are ANDed
+        out = run(slug="general", type="note")
+        assert "alpha" in out and "gamma" in out and "beta" not in out
+
+        # ref matches per key, not raw substring: PROJ-1 must NOT match PROJ-10
+        out = run(ref="PROJ-1")
+        assert "alpha" in out and "gamma" not in out and "beta" not in out
+
+        # since is inclusive of its bound and excludes earlier days
+        out = run(since="2026-07-01")
+        assert "gamma" in out and "alpha" not in out and "beta" not in out
+        out = run(since="2026-06-30")
+        assert "alpha" in out and "beta" in out and "gamma" in out
+
+        # until is inclusive of its bound and excludes later days
+        out = run(until="2026-06-30")
+        assert "alpha" in out and "beta" in out and "gamma" not in out
+
+
+def test_report_range():
+    with worklog_root():
+        for at, body in (("2026-07-01T09:00", "day one"),
+                         ("2026-07-02T09:00", "day two"),
+                         ("2026-07-04T09:00", "day four")):
+            wl.cmd_add(_NS(slug="general", type="note", ref="", at=at, body=body))
+
+        def report(**kw):
+            base = dict(day="today", since=None, until=None)
+            base.update(kw)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.cmd_report(_NS(**base))
+            return buf.getvalue()
+
+        # range spans multiple days, grouped newest-first, out-of-range excluded
+        out = report(since="2026-07-02", until="2026-07-04")
+        assert "day two" in out and "day four" in out and "day one" not in out
+        assert out.index("## 2026-07-04") < out.index("## 2026-07-02")  # newest first
+
+        # open-ended --since (no --until) reaches the latest day
+        out = report(since="2026-07-04")
+        assert "day four" in out and "day two" not in out
+
+        # empty range reports cleanly
+        assert "no entries" in report(since="2025-01-01", until="2025-12-31")
+
+
+def test_report_empty_day():
+    with worklog_root():
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_report(_NS(day="2020-01-01", since=None, until=None))
+        assert "no entries" in buf.getvalue()
+
+
+def test_main_add():
+    with worklog_root() as d:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.main(["add", "--slug", "general", "--type", "pr",
+                     "--ref", "PROJ-9", "--at", "2026-06-30T12:00", "did a thing"])
+        assert "- 12:00 [pr] did a thing (refs: PROJ-9)" in buf.getvalue()
+        text = open(os.path.join(d, "work_log.md")).read()
+        assert "did a thing" in text
+
+
+def test_validation_exits():
+    with worklog_root():
+        for argv in (
+            ["add", "--slug", "general", "--type", "bogus", "x"],
+            ["add", "--slug", "general", "--type", "note", "--at", "5pm", "x"],
+        ):
+            try:
+                wl.main(argv)
+                assert False, f"expected SystemExit for {argv}"
+            except SystemExit as ex:
+                assert ex.code not in (0, None), ex.code
+
+
+def test_add_unknown_slug_warns_but_logs():
+    with worklog_root() as d:
+        err = io.StringIO()
+        with redirect_stderr(err):
+            wl.main(["add", "--slug", "mystery", "--type", "note",
+                     "--at", "2026-07-01T09:00", "still logged"])
+        assert "unknown slug" in err.getvalue()          # typo guard fired
+        text = open(os.path.join(d, "work_log.md")).read()
+        assert "still logged" in text                    # entry written anyway
+
+
+def test_slug_add_ls_rm():
+    with worklog_root():
+        def run(*argv):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.main(["slug", *argv])
+            return buf.getvalue()
+
+        assert run("ls").split() == ["general"]        # seeded default
+        run("add", "backend")
+        run("add", "infra")
+        assert run("ls").split() == ["general", "backend", "infra"]  # pos order
+
+        assert "already registered" in run("add", "backend")
+        assert run("ls").split() == ["general", "backend", "infra"]  # unchanged
+
+        run("rm", "backend")
+        assert run("ls").split() == ["general", "infra"]
+        assert "was not registered" in run("rm", "nope")
+
+
+def test_known_slugs_order():
+    with worklog_root():
+        conn = wl.connect()                            # seeds general at pos 0
+        conn.execute("INSERT INTO slugs(name, pos) VALUES('zeta', 5), ('alpha', 1)")
+        conn.commit()
+        assert wl.known_slugs(conn) == ["general", "alpha", "zeta"]  # by pos, not name
+        conn.close()
+
+
+def test_slug_rm_with_entries():
+    with worklog_root():
+        wl.main(["slug", "add", "backend"])
+        wl.cmd_add(_NS(slug="backend", type="note", ref="",
+                       at="2026-07-01T09:00", body="x"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.main(["slug", "rm", "backend"])
+        out = buf.getvalue()
+        assert "removed slug 'backend'" in out
+        assert "1 existing entries will now sort as unknown" in out
 
 
 def test_slug_missing_name_exits():
-    with tempfile.TemporaryDirectory() as d:
-        os.environ["WORKLOG_ROOT"] = d
-        try:
-            for argv in (["slug", "add"], ["slug", "rm"]):
-                try:
-                    wl.main(argv)
-                    assert False, f"expected SystemExit for {argv}"
-                except SystemExit as ex:
-                    assert ex.code not in (0, None), ex.code
-        finally:
-            del os.environ["WORKLOG_ROOT"]
+    with worklog_root():
+        for argv in (["slug", "add"], ["slug", "rm"]):
+            try:
+                wl.main(argv)
+                assert False, f"expected SystemExit for {argv}"
+            except SystemExit as ex:
+                assert ex.code not in (0, None), ex.code
 
 
 if __name__ == "__main__":

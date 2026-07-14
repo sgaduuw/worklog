@@ -56,6 +56,11 @@ def normalize_refs(s):
     return ",".join(p.strip() for p in s.split(",") if p.strip())
 
 
+def fmt_refs(refs):
+    """Stored 'PROJ-1,PROJ-2' -> display 'PROJ-1, PROJ-2'; '' -> 'none'."""
+    return refs.replace(",", ", ") if refs else "none"
+
+
 _DAY_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
 _SLUG_RE = re.compile(r"^### (\S+)\s*$")
 # body is non-greedy so the optional trailing refs suffix is not swallowed.
@@ -100,8 +105,7 @@ def render_day(day, entries, order):
     for slug in sorted({e.slug for e in entries}, key=lambda s: slug_sort_key(s, order)):
         lines.append(f"### {slug}")
         for e in sorted((x for x in entries if x.slug == slug), key=lambda x: x.ts):
-            refs = e.refs.replace(",", ", ") if e.refs else "none"
-            lines.append(f"- {e.ts[11:16]} [{e.type}] {e.body} (refs: {refs})")
+            lines.append(f"- {e.ts[11:16]} [{e.type}] {e.body} (refs: {fmt_refs(e.refs)})")
         lines.append("")  # blank line after each slug block
     return "\n".join(lines).rstrip()
 
@@ -222,8 +226,7 @@ def cmd_add(args):
     conn.commit()
     write_md(conn)
     conn.close()
-    refs_disp = refs.replace(",", ", ") if refs else "none"
-    print(f"- {ts[11:16]} [{args.type}] {body} (refs: {refs_disp})")
+    print(f"- {ts[11:16]} [{args.type}] {body} (refs: {fmt_refs(refs)})")
 
 
 def cmd_report(args):
@@ -268,8 +271,7 @@ def cmd_log(args):
 
     hits = sorted((e for e in entries if keep(e)), key=lambda x: x.ts, reverse=True)
     for e in hits:
-        refs = e.refs.replace(",", ", ") if e.refs else "none"
-        print(f"{e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] {e.body} (refs: {refs})")
+        print(f"{e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] {e.body} (refs: {fmt_refs(e.refs)})")
 
 
 def cmd_render(args):
