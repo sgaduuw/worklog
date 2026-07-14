@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+work_log.db
+work_log.md
+*.swp
+*.swo
