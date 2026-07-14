@@ -1,5 +1,7 @@
 # worklog (`wl`)
 
+![CI](https://github.com/sgaduuw/worklog/actions/workflows/ci.yml/badge.svg)
+
 A tiny SQLite-backed work log. You append entries with `wl add`; `work_log.md`
 is a generated, human-readable export (newest day first). The markdown is the
 source of record, the `.db` is a rebuildable cache: if `work_log.md` changes
