@@ -42,16 +42,42 @@ export WORKLOG_ROOT="$HOME/notes"
 # regenerate work_log.md from the DB, or rebuild the DB from the markdown
 ./wl render
 ./wl import
+
+# manage project slugs (see below)
+./wl slug ls
+./wl slug add backend
+./wl slug rm backend
 ```
 
 ### Fields
 
-- `--slug`: project bucket. `general` is the one built-in canonical slug (sorts
-  first); any other slug is accepted (with a warning) and sorts alphabetically
-  after it. Add your own canonical slugs to `SLUG_ORDER` in `worklog.py`.
+- `--slug`: project bucket. `general` is the one built-in slug. Register your own
+  with `wl slug add` (see [Managing slugs](#managing-slugs)). An unregistered slug
+  still logs, but warns and sorts after the registered ones.
 - `--type`: one of `ticket`, `pr`, `idea`, `decision`, `blocker`, `note`.
 - `--ref` (optional): comma-separated keys, e.g. `PROJ-12,PROJ-13`.
 - `--at` (optional): `HH:MM` (today) or `YYYY-MM-DDTHH:MM` (past day). Defaults to now.
+
+## Managing slugs
+
+Slugs are your project buckets. Manage them at runtime, no config files or source
+edits:
+
+```sh
+./wl slug ls            # list registered slugs, in display order
+./wl slug add backend   # register a slug (appended to the display order)
+./wl slug rm backend    # unregister a slug
+```
+
+Registration is optional and does two things: it sets the **display order** in
+reports (registered slugs appear in the order you added them, then any
+unregistered slug alphabetically), and it silences the "unknown slug" warning,
+which otherwise fires as a typo guard. Removing a slug that still has entries is
+allowed; those entries keep their text and just sort after the registered ones.
+
+Slugs are stored in `work_log.db`, not in `work_log.md`. They are local tooling
+config, so they do not travel with the exported markdown; on a new machine,
+re-register the slugs you want.
 
 ## Health check (optional)
 

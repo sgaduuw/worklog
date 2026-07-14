@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 TYPES = ("ticket", "pr", "idea", "decision", "blocker", "note")
-SLUG_ORDER = ("general",)  # canonical slugs sort first; add your own project slugs here
+# Project slugs are managed at runtime (`wl slug add/rm/ls`) and stored in the DB,
+# not in this file. `known_slugs(conn)` returns them in display order.
 
 
 class Entry(NamedTuple):
@@ -79,15 +80,15 @@ HEADER_BLOCK = (
 )
 
 
-def slug_sort_key(slug):
-    """Canonical slugs in SLUG_ORDER first, then unknown slugs alphabetically."""
-    return (SLUG_ORDER.index(slug), "") if slug in SLUG_ORDER else (len(SLUG_ORDER), slug)
+def slug_sort_key(slug, order):
+    """Registered slugs in `order` first, then unregistered slugs alphabetically."""
+    return (order.index(slug), "") if slug in order else (len(order), slug)
 
 
-def render_day(day, entries):
+def render_day(day, entries, order):
     """One '## day' section: slug groups in display order, entries time-sorted. No file header."""
     lines = [f"## {day}", ""]
-    for slug in sorted({e.slug for e in entries}, key=slug_sort_key):
+    for slug in sorted({e.slug for e in entries}, key=lambda s: slug_sort_key(s, order)):
         lines.append(f"### {slug}")
         for e in sorted((x for x in entries if x.slug == slug), key=lambda x: x.ts):
             refs = e.refs.replace(",", ", ") if e.refs else "none"
@@ -96,12 +97,12 @@ def render_day(day, entries):
     return "\n".join(lines).rstrip()
 
 
-def render_markdown(entries):
+def render_markdown(entries, order):
     """Full work_log.md: header + every day newest-first + trailing newline."""
     by_day = {}
     for e in entries:
         by_day.setdefault(e.ts[:10], []).append(e)
-    blocks = [render_day(d, by_day[d]) for d in sorted(by_day, reverse=True)]
+    blocks = [render_day(d, by_day[d], order) for d in sorted(by_day, reverse=True)]
     body = "\n\n".join(blocks)
     return f"{HEADER_BLOCK}\n\n{body}\n" if body else f"{HEADER_BLOCK}\n"
 
@@ -116,6 +117,10 @@ CREATE TABLE IF NOT EXISTS entries(
   body TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);
+CREATE TABLE IF NOT EXISTS slugs(
+  name TEXT PRIMARY KEY,
+  pos  INTEGER NOT NULL   -- display order, ascending
+);
 """
 
 
@@ -153,6 +158,12 @@ def connect():
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(_SCHEMA)
+    # ponytail: slugs live in the DB, not work_log.md, so they are machine-local
+    # tooling config, not portable log content. A from-scratch `wl import` reseeds
+    # to just 'general'. Add a slug export to the markdown only if that ever bites.
+    if not conn.execute("SELECT 1 FROM slugs LIMIT 1").fetchone():
+        conn.execute("INSERT INTO slugs(name, pos) VALUES('general', 0)")
+        conn.commit()
     if stale:
         _import_into(conn)
     return conn
@@ -163,9 +174,14 @@ def _all_entries(conn):
     return [Entry(*r) for r in rows]
 
 
+def known_slugs(conn):
+    """Registered slug names in display (pos) order."""
+    return [r[0] for r in conn.execute("SELECT name FROM slugs ORDER BY pos")]
+
+
 def write_md(conn):
     """Render all entries and atomically replace work_log.md."""
-    text = render_markdown(_all_entries(conn))
+    text = render_markdown(_all_entries(conn), known_slugs(conn))
     target = md_path()
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     with os.fdopen(fd, "w") as f:
@@ -176,8 +192,6 @@ def write_md(conn):
 def cmd_add(args):
     if args.type not in TYPES:
         sys.exit(f"error: bad --type {args.type!r}; valid: {', '.join(TYPES)}")
-    if args.slug not in SLUG_ORDER:
-        print(f"warning: unknown slug {args.slug!r} (new project?)", file=sys.stderr)
     try:
         ts = resolve_at(args.at)
     except ValueError as e:
@@ -185,6 +199,9 @@ def cmd_add(args):
     refs = normalize_refs(args.ref)
     body = args.body.replace("\n", " ").strip()
     conn = connect()
+    if args.slug not in known_slugs(conn):
+        print(f"warning: unknown slug {args.slug!r} "
+              f"(register it with `wl slug add {args.slug}`?)", file=sys.stderr)
     conn.execute(
         "INSERT INTO entries(ts,slug,type,refs,body) VALUES(?,?,?,?,?)",
         (ts, args.slug, args.type, refs, body),
@@ -200,11 +217,12 @@ def cmd_report(args):
     conn = connect()
     day = datetime.now().strftime("%Y-%m-%d") if args.day == "today" else args.day
     entries = [e for e in _all_entries(conn) if e.ts[:10] == day]
+    order = known_slugs(conn)
     conn.close()
     if not entries:
         print(f"(no entries for {day})")
         return
-    print(render_day(day, entries))
+    print(render_day(day, entries, order))
 
 
 def cmd_log(args):
@@ -246,6 +264,40 @@ def cmd_import(args):
     print(f"imported {md_path()} -> {db_path()} ({n} entries)")
 
 
+def cmd_slug(args):
+    conn = connect()
+    if args.action == "ls":
+        for name in known_slugs(conn):
+            print(name)
+    elif args.action == "add":
+        if not args.name:
+            conn.close()
+            sys.exit("error: `slug add` needs a name")
+        # pos = one past the current max, so new slugs append to the display order.
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO slugs(name, pos) "
+            "VALUES(?, (SELECT COALESCE(MAX(pos), -1) + 1 FROM slugs))",
+            (args.name,),
+        )
+        conn.commit()
+        print(f"added slug {args.name!r}" if cur.rowcount
+              else f"slug {args.name!r} already registered")
+    elif args.action == "rm":
+        if not args.name:
+            conn.close()
+            sys.exit("error: `slug rm` needs a name")
+        cur = conn.execute("DELETE FROM slugs WHERE name = ?", (args.name,))
+        conn.commit()
+        if not cur.rowcount:
+            print(f"slug {args.name!r} was not registered")
+        else:
+            n = conn.execute("SELECT count(*) FROM entries WHERE slug = ?",
+                             (args.name,)).fetchone()[0]
+            note = f" ({n} existing entr{'y' if n == 1 else 'ies'} will now sort as unknown)" if n else ""
+            print(f"removed slug {args.name!r}{note}")
+    conn.close()
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="wl", description="SQLite-backed work log.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -275,6 +327,11 @@ def main(argv=None):
 
     im = sub.add_parser("import", help="rebuild the DB from work_log.md")
     im.set_defaults(fn=cmd_import)
+
+    sl = sub.add_parser("slug", help="manage project slugs (ls/add/rm)")
+    sl.add_argument("action", choices=("ls", "add", "rm"))
+    sl.add_argument("name", nargs="?", help="slug name (for add/rm)")
+    sl.set_defaults(fn=cmd_slug)
 
     args = p.parse_args(argv)
     args.fn(args)

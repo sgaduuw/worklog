@@ -3,7 +3,7 @@ import io
 import os
 import sys
 import tempfile
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 
 import worklog as wl
@@ -61,7 +61,7 @@ def _sample_entries():
 
 
 def test_render_ordering():
-    out = wl.render_markdown(_sample_entries())
+    out = wl.render_markdown(_sample_entries(), ["general"])
     # newest day first
     assert out.index("## 2026-06-30") < out.index("## 2026-06-29")
     # within 2026-06-30: general (canonical first) before database
@@ -74,8 +74,8 @@ def test_render_ordering():
 
 
 def test_roundtrip_idempotent():
-    once = wl.render_markdown(_sample_entries())
-    twice = wl.render_markdown(wl.parse_markdown(once))
+    once = wl.render_markdown(_sample_entries(), ["general"])
+    twice = wl.render_markdown(wl.parse_markdown(once), ["general"])
     assert once == twice, f"render not a fixed point:\n--- once ---\n{once}\n--- twice ---\n{twice}"
 
 
@@ -197,6 +197,71 @@ def test_validation_exits():
                     assert False, f"expected SystemExit for {argv}"
                 except SystemExit as ex:
                     assert ex.code not in (0, None), ex.code
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_slug_add_ls_rm():
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            def run(*argv):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    wl.main(["slug", *argv])
+                return buf.getvalue()
+
+            assert run("ls").split() == ["general"]        # seeded default
+            run("add", "backend")
+            run("add", "infra")
+            assert run("ls").split() == ["general", "backend", "infra"]  # pos order
+
+            assert "already registered" in run("add", "backend")
+            assert run("ls").split() == ["general", "backend", "infra"]  # unchanged
+
+            run("rm", "backend")
+            assert run("ls").split() == ["general", "infra"]
+            assert "was not registered" in run("rm", "nope")
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_known_slugs_order():
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            conn = wl.connect()                            # seeds general at pos 0
+            conn.execute("INSERT INTO slugs(name, pos) VALUES('zeta', 5), ('alpha', 1)")
+            conn.commit()
+            assert wl.known_slugs(conn) == ["general", "alpha", "zeta"]  # by pos, not name
+            conn.close()
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_render_custom_order():
+    order = ["general", "backend"]                          # 'infra' is unregistered
+    entries = [
+        wl.Entry("2026-07-01T09:00:00", "infra", "note", "", "c"),
+        wl.Entry("2026-07-01T09:01:00", "general", "note", "", "a"),
+        wl.Entry("2026-07-01T09:02:00", "backend", "note", "", "b"),
+    ]
+    out = wl.render_markdown(entries, order)
+    # registered slugs in pos order, unregistered slug sorts last
+    assert out.index("### general") < out.index("### backend") < out.index("### infra")
+
+
+def test_add_unknown_slug_warns_but_logs():
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            err = io.StringIO()
+            with redirect_stderr(err):
+                wl.main(["add", "--slug", "mystery", "--type", "note",
+                         "--at", "2026-07-01T09:00", "still logged"])
+            assert "unknown slug" in err.getvalue()          # typo guard fired
+            text = open(os.path.join(d, "work_log.md")).read()
+            assert "still logged" in text                    # entry written anyway
         finally:
             del os.environ["WORKLOG_ROOT"]
 
