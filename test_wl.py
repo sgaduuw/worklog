@@ -30,6 +30,10 @@ def test_normalize_refs():
     assert wl.normalize_refs(" PROJ-1 ") == "PROJ-1"
     assert wl.normalize_refs("") == ""
     assert wl.normalize_refs(None) == ""
+    # empty segments (trailing comma, doubled comma, all-whitespace) are dropped
+    assert wl.normalize_refs("PROJ-1,,PROJ-2") == "PROJ-1,PROJ-2"
+    assert wl.normalize_refs("PROJ-1,") == "PROJ-1"
+    assert wl.normalize_refs("  ,  ") == ""
 
 
 def test_parse_markdown():
@@ -345,6 +349,20 @@ def test_slug_rm_with_entries():
             out = buf.getvalue()
             assert "removed slug 'backend'" in out
             assert "1 existing entries will now sort as unknown" in out
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_add_body_sanitized():
+    # a multi-line body must collapse to one line, else it breaks the md line format
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:00", body="  line one\nline two  "))
+            text = open(os.path.join(d, "work_log.md")).read()
+            # flattened to one line and stripped of surrounding whitespace
+            assert "- 09:00 [note] line one line two (refs: none)" in text
         finally:
             del os.environ["WORKLOG_ROOT"]
 
