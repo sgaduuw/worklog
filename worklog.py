@@ -293,7 +293,7 @@ def cmd_slug(args):
         else:
             n = conn.execute("SELECT count(*) FROM entries WHERE slug = ?",
                              (args.name,)).fetchone()[0]
-            note = f" ({n} existing entr{'y' if n == 1 else 'ies'} will now sort as unknown)" if n else ""
+            note = f" ({n} existing entries will now sort as unknown)" if n else ""
             print(f"removed slug {args.name!r}{note}")
     conn.close()
 
