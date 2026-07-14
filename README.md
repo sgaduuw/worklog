@@ -112,3 +112,16 @@ early. Uses BSD `stat` (macOS); adjust for GNU `stat` on Linux.
 ```sh
 python3 test_wl.py
 ```
+
+## Version history
+
+Grouped by milestone; see `git log` for the full commit-level detail.
+
+- **0.4** Hardening: `--at` now rejects impossible values (`99:99`, month 13)
+  instead of storing garbage; test coverage extended to every logic branch;
+  internal dedupe (ref formatting, test setup).
+- **0.3** Date-range roundups (`report --since/--until`); documented how to fix or
+  delete entries (edit `work_log.md`) and how to search (grep the export).
+- **0.2** Runtime slug management: `wl slug ls/add/rm`, DB-backed, custom order.
+- **0.1** Initial release: SQLite-backed log with `add`, `report`, `log`,
+  `render`, `import`; markdown export as source of record. MIT licensed.
