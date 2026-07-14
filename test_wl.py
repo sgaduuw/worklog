@@ -14,7 +14,9 @@ def test_resolve_at():
     assert wl.resolve_at("17:32", now=fixed) == "2026-06-29T17:32:00"
     assert wl.resolve_at("2026-06-29T17:32") == "2026-06-29T17:32:00"
     assert wl.resolve_at(None, now=fixed) == "2026-06-29T10:00:00"
-    for bad in ("nonsense", "5pm", "2026-06-29", "99:99 maybe"):
+    # reject both wrong shapes AND right-shape-impossible-value inputs
+    for bad in ("nonsense", "5pm", "2026-06-29", "99:99 maybe",
+                "99:99", "24:00", "2026-13-45T00:00", "2026-06-29T25:61"):
         try:
             wl.resolve_at(bad)
             assert False, f"expected ValueError for {bad!r}"
@@ -151,6 +153,14 @@ def test_log_filters():
 
             out = run(slug="backend")
             assert "beta" in out and "alpha" not in out and "gamma" not in out
+
+            # type filter (only 'beta' is a pr)
+            out = run(type="pr")
+            assert "beta" in out and "alpha" not in out and "gamma" not in out
+
+            # combined filters are ANDed
+            out = run(slug="general", type="note")
+            assert "alpha" in out and "gamma" in out and "beta" not in out
 
             # ref matches per key, not raw substring: PROJ-1 must NOT match PROJ-10
             out = run(ref="PROJ-1")
@@ -294,6 +304,61 @@ def test_add_unknown_slug_warns_but_logs():
             assert "unknown slug" in err.getvalue()          # typo guard fired
             text = open(os.path.join(d, "work_log.md")).read()
             assert "still logged" in text                    # entry written anyway
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_roundtrip_preserves_entries():
+    # render -> parse must return the entries intact, incl. awkward bodies
+    order = ["general"]
+    entries = [
+        wl.Entry("2026-07-01T09:00:00", "general", "note", "PROJ-1,PROJ-2",
+                 "colons: and [brackets] and a note-ish word in body"),
+        wl.Entry("2026-07-01T09:05:00", "general", "pr", "", "plain body"),
+    ]
+    got = wl.parse_markdown(wl.render_markdown(entries, order))
+    assert got == entries, got
+
+
+def test_report_empty_day():
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.cmd_report(_NS(day="2020-01-01", since=None, until=None))
+            assert "no entries" in buf.getvalue()
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_slug_rm_with_entries():
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            wl.main(["slug", "add", "backend"])
+            wl.cmd_add(_NS(slug="backend", type="note", ref="",
+                           at="2026-07-01T09:00", body="x"))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.main(["slug", "rm", "backend"])
+            out = buf.getvalue()
+            assert "removed slug 'backend'" in out
+            assert "1 existing entries will now sort as unknown" in out
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_slug_missing_name_exits():
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            for argv in (["slug", "add"], ["slug", "rm"]):
+                try:
+                    wl.main(argv)
+                    assert False, f"expected SystemExit for {argv}"
+                except SystemExit as ex:
+                    assert ex.code not in (0, None), ex.code
         finally:
             del os.environ["WORKLOG_ROOT"]
 

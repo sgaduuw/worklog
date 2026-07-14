@@ -28,15 +28,24 @@ _ISO_MIN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 
 def resolve_at(at, now=None):
-    """None -> now; 'HH:MM' -> today at that time; 'YYYY-MM-DDTHH:MM' -> exact. Else ValueError."""
+    """None -> now; 'HH:MM' -> today at that time; 'YYYY-MM-DDTHH:MM' -> exact. Else ValueError.
+
+    The regex checks the 2-digit shape; strptime then rejects impossible values
+    (99:99, hour 24, month 13, ...) so garbage never reaches the timestamp column.
+    """
     if now is None:
         now = datetime.now()
     if at is None:
         return now.strftime("%Y-%m-%dT%H:%M:%S")
-    if _HHMM.fullmatch(at):
-        return now.strftime("%Y-%m-%d") + f"T{at}:00"
-    if _ISO_MIN.fullmatch(at):
-        return at + ":00"
+    try:
+        if _HHMM.fullmatch(at):
+            datetime.strptime(at, "%H:%M")
+            return now.strftime("%Y-%m-%d") + f"T{at}:00"
+        if _ISO_MIN.fullmatch(at):
+            datetime.strptime(at, "%Y-%m-%dT%H:%M")
+            return at + ":00"
+    except ValueError:
+        pass  # shape matched but the value is impossible; fall through to one error
     raise ValueError(f"bad --at {at!r}; want HH:MM or YYYY-MM-DDTHH:MM")
 
 
