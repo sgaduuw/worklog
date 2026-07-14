@@ -123,7 +123,7 @@ def test_add_and_report():
             assert "- 09:00 [note] hello world (refs: PROJ-1, PROJ-2)" in text
             buf = io.StringIO()
             with redirect_stdout(buf):
-                wl.cmd_report(_NS(day="2026-06-30"))
+                wl.cmd_report(_NS(day="2026-06-30", since=None, until=None))
             assert "### general" in buf.getvalue()
             assert "09:00 [note] hello world" in buf.getvalue()
         finally:
@@ -197,6 +197,38 @@ def test_validation_exits():
                     assert False, f"expected SystemExit for {argv}"
                 except SystemExit as ex:
                     assert ex.code not in (0, None), ex.code
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_report_range():
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["WORKLOG_ROOT"] = d
+        try:
+            for at, body in (("2026-07-01T09:00", "day one"),
+                             ("2026-07-02T09:00", "day two"),
+                             ("2026-07-04T09:00", "day four")):
+                wl.cmd_add(_NS(slug="general", type="note", ref="", at=at, body=body))
+
+            def report(**kw):
+                base = dict(day="today", since=None, until=None)
+                base.update(kw)
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    wl.cmd_report(_NS(**base))
+                return buf.getvalue()
+
+            # range spans multiple days, grouped newest-first, out-of-range excluded
+            out = report(since="2026-07-02", until="2026-07-04")
+            assert "day two" in out and "day four" in out and "day one" not in out
+            assert out.index("## 2026-07-04") < out.index("## 2026-07-02")  # newest first
+
+            # open-ended --since (no --until) reaches the latest day
+            out = report(since="2026-07-04")
+            assert "day four" in out and "day two" not in out
+
+            # empty range reports cleanly
+            assert "no entries" in report(since="2025-01-01", until="2025-12-31")
         finally:
             del os.environ["WORKLOG_ROOT"]
 

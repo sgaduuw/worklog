@@ -97,13 +97,17 @@ def render_day(day, entries, order):
     return "\n".join(lines).rstrip()
 
 
-def render_markdown(entries, order):
-    """Full work_log.md: header + every day newest-first + trailing newline."""
+def render_days(entries, order):
+    """Group entries by day and render each as a '## day' section, newest day first."""
     by_day = {}
     for e in entries:
         by_day.setdefault(e.ts[:10], []).append(e)
-    blocks = [render_day(d, by_day[d], order) for d in sorted(by_day, reverse=True)]
-    body = "\n\n".join(blocks)
+    return "\n\n".join(render_day(d, by_day[d], order) for d in sorted(by_day, reverse=True))
+
+
+def render_markdown(entries, order):
+    """Full work_log.md: header + every day newest-first + trailing newline."""
+    body = render_days(entries, order)
     return f"{HEADER_BLOCK}\n\n{body}\n" if body else f"{HEADER_BLOCK}\n"
 
 
@@ -215,14 +219,24 @@ def cmd_add(args):
 
 def cmd_report(args):
     conn = connect()
-    day = datetime.now().strftime("%Y-%m-%d") if args.day == "today" else args.day
-    entries = [e for e in _all_entries(conn) if e.ts[:10] == day]
     order = known_slugs(conn)
+    entries = _all_entries(conn)
     conn.close()
-    if not entries:
-        print(f"(no entries for {day})")
+    # Range mode (--since/--until) takes precedence over --day, so a roundup for a
+    # standup or bi-weekly meeting is one command. Date strings are YYYY-MM-DD, which
+    # compares correctly as plain strings; open-ended bounds use lexical sentinels.
+    if args.since or args.until:
+        lo, hi = args.since or "0000-00-00", args.until or "9999-99-99"
+        sel = [e for e in entries if lo <= e.ts[:10] <= hi]
+        label = f"{lo}..{hi}"
+    else:
+        day = datetime.now().strftime("%Y-%m-%d") if args.day == "today" else args.day
+        sel = [e for e in entries if e.ts[:10] == day]
+        label = day
+    if not sel:
+        print(f"(no entries for {label})")
         return
-    print(render_day(day, entries, order))
+    print(render_days(sel, order))
 
 
 def cmd_log(args):
@@ -310,8 +324,10 @@ def main(argv=None):
     a.add_argument("body")
     a.set_defaults(fn=cmd_add)
 
-    r = sub.add_parser("report", help="print one day as markdown")
+    r = sub.add_parser("report", help="print one day (or a --since/--until range) as markdown")
     r.add_argument("--day", default="today")
+    r.add_argument("--since", help="range start YYYY-MM-DD; groups every day in range")
+    r.add_argument("--until", help="range end YYYY-MM-DD, inclusive")
     r.set_defaults(fn=cmd_report)
 
     g = sub.add_parser("log", help="filtered list across all history")

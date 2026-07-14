@@ -34,6 +34,10 @@ export WORKLOG_ROOT="$HOME/notes"
 ./wl report --day today
 ./wl report --day 2026-07-01
 
+# roundup: every day in a range, grouped (handy for a standup or biweekly review)
+./wl report --since 2026-07-01 --until 2026-07-14
+./wl report --since 2026-07-07                    # open-ended: up to the latest day
+
 # search across all history
 ./wl log --slug backend
 ./wl log --ref PROJ-9
@@ -78,6 +82,23 @@ allowed; those entries keep their text and just sort after the registered ones.
 Slugs are stored in `work_log.db`, not in `work_log.md`. They are local tooling
 config, so they do not travel with the exported markdown; on a new machine,
 re-register the slugs you want.
+
+## Fixing or deleting an entry
+
+There is no `wl edit`/`wl rm` command, and it doesn't need one: `work_log.md` is
+the editable source of record. Open it in your editor, fix or delete the line, and
+save. The next `wl` command re-imports the markdown (it re-imports whenever the
+file is newer than the DB), so your change is picked up automatically. To force it
+immediately, run `wl import`.
+
+## Searching
+
+`wl log` filters by slug, type, ref, and date. For free-text search over the entry
+bodies, grep the export:
+
+```sh
+grep -i hugepages work_log.md
+```
 
 ## Health check (optional)
 
