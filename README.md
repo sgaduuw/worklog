@@ -47,6 +47,11 @@ export WORKLOG_ROOT="$HOME/notes"
 ./wl log --slug backend -n 5     # newest 5
 ./wl log --slug backend -n 0     # no cap; the whole history
 
+# count instead of list (same filters as `log`; see below)
+./wl stats
+./wl stats --since 2026-07-01 --top 3
+./wl stats --slug backend --when
+
 # regenerate work_log.md from the DB, or rebuild the DB from the markdown
 ./wl render
 ./wl import
@@ -117,6 +122,52 @@ any other free-text search, grep the export:
 grep -i hugepages work_log.md
 ```
 
+## Stats
+
+`wl stats` aggregates rather than lists, and takes the same filters as `wl log`
+(`--slug`, `--type`, `--ref`, `--since`, `--until`), so any slice you can list you can
+also count:
+
+```
+263 entries, 2026-08-03 to 2026-08-16
+
+by type
+  pr        71  ████████████████████████
+  decision  67  ███████████████████████
+  note      57  ███████████████████
+  ticket    53  ██████████████████
+  blocker   11  ████
+  idea       4  █
+
+by slug
+  general  245  ████████████████████████
+  backend   14  █
+  docs       2  █
+  infra      1  █
+  website    1  █
+
+by week
+  2026-W32  132  ████████████████████████
+  2026-W33  131  ████████████████████████
+
+top refs (of 92)
+  PROJ-12  39  ████████████████████████
+  PROJ-9   20  ████████████
+  PROJ-13  19  ████████████
+  ... and 89 more
+```
+
+Type, slug and ref blocks are sorted biggest first. Week blocks, and the weekday and
+hour blocks that `--when` adds, stay in clock order instead: the question there is the
+shape over time, and a busiest-first list hides the gaps. Weeks are ISO weeks, which is
+how sprint tooling counts them and where `strftime %W` disagrees around New Year.
+
+Bars scale to the largest row in their own block, and any non-zero count gets at least
+one block, so a 1-in-500 row shows up instead of rendering blank. An entry can cite
+several refs, so that block counts mentions rather than entries; `--top N` caps it
+(default 10) and says how many it withheld. Blocks with nothing to show are omitted,
+as are weekdays and hours that saw no entries.
+
 ## Health check (optional)
 
 `worklog-healthcheck.sh` is a shell snippet you can wire into a shell startup or
@@ -134,6 +185,11 @@ python3 test_wl.py
 
 Grouped by milestone; see `git log` for the full commit-level detail.
 
+- **0.5** `wl stats`: counts by type, slug, ISO week and ref, `--when` for weekday
+  and hour. `wl log` shows the newest 20 by default (`-n`, `-n 0` for all) and exits
+  quietly on a closed pipe. `--ref` also matches ticket keys named only in an entry
+  body. The markdown round trip is verified before the file is replaced, and slugs or
+  refs that would not survive it are refused at `add`.
 - **0.4** Hardening: `--at` now rejects impossible values (`99:99`, month 13)
   instead of storing garbage; test coverage extended to every logic branch;
   internal dedupe (ref formatting, test setup).
