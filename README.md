@@ -40,10 +40,12 @@ export WORKLOG_ROOT="$HOME/notes"
 ./wl report --since 2026-07-01 --until 2026-07-14
 ./wl report --since 2026-07-07                    # open-ended: up to the latest day
 
-# search across all history
+# search across all history (newest first, 20 entries unless you say otherwise)
 ./wl log --slug backend
 ./wl log --ref PROJ-9
 ./wl log --type decision --since 2026-07-01 --until 2026-07-14
+./wl log --slug backend -n 5     # newest 5
+./wl log --slug backend -n 0     # no cap; the whole history
 
 # regenerate work_log.md from the DB, or rebuild the DB from the markdown
 ./wl render
@@ -95,8 +97,9 @@ immediately, run `wl import`.
 
 ## Searching
 
-`wl log` filters by slug, type, ref, and date. For free-text search over the entry
-bodies, grep the export:
+`wl log` filters by slug, type, ref, and date, prints newest first, and shows the
+newest 20 by default (`-n N`, or `-n 0` for all) with a tail line counting what it
+withheld. For free-text search over the entry bodies, grep the export:
 
 ```sh
 grep -i hugepages work_log.md

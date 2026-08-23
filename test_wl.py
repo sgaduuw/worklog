@@ -1,6 +1,9 @@
 """Self-checks for worklog.py. Run: python3 test_wl.py"""
 import io
 import os
+import pathlib
+import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -182,7 +185,7 @@ def test_log_filters():
                        at="2026-07-01T09:00", body="gamma"))
 
         def run(**kw):
-            base = dict(slug=None, type=None, ref=None, since=None, until=None)
+            base = dict(slug=None, type=None, ref=None, since=None, until=None, limit=0)
             base.update(kw)
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -401,6 +404,51 @@ def test_slug_missing_name_exits():
                 assert False, f"expected SystemExit for {argv}"
             except SystemExit as ex:
                 assert ex.code not in (0, None), ex.code
+
+
+
+def test_log_limit():
+    with worklog_root():
+        for hh, body in (("09", "oldest"), ("10", "middle"), ("11", "newest")):
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at=f"2026-07-01T{hh}:00", body=body))
+
+        def run(limit):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.cmd_log(_NS(slug=None, type=None, ref=None, since=None,
+                               until=None, limit=limit))
+            return buf.getvalue()
+
+        # Output is newest-first, so a limit keeps the newest and drops the oldest.
+        out = run(2)
+        assert "newest" in out and "middle" in out and "oldest" not in out
+        # Truncation is never silent: the count says what was withheld.
+        assert "... and 1 more" in out
+
+        # 0 means all, and then there is nothing to announce.
+        out = run(0)
+        assert "oldest" in out and "more" not in out
+
+
+def test_log_survives_a_closed_pipe():
+    """`wl log --limit 0 | head -1` must exit quietly, not print a traceback.
+
+    Needs enough output to overflow the ~64 KB pipe buffer, or the writer finishes
+    before the reader is gone and no SIGPIPE is ever delivered.
+    """
+    with worklog_root() as d:
+        lines = "".join(f"- {i // 60:02d}:{i % 60:02d} [note] {'x' * 500} (refs: none)\n"
+                        for i in range(300))
+        (pathlib.Path(d) / "work_log.md").write_text(
+            f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n{lines}")
+        script = pathlib.Path(__file__).resolve().parent / "wl"
+        proc = subprocess.run(
+            ["sh", "-c", f'"{sys.executable}" "{script}" log --limit 0 | head -1'],
+            capture_output=True, text=True, env={**os.environ, "WORKLOG_ROOT": d},
+            check=False,
+        )
+        assert proc.stderr == "", proc.stderr
 
 
 if __name__ == "__main__":

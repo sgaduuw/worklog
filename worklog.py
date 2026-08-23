@@ -3,6 +3,7 @@
 import argparse
 import os
 import re
+import signal
 import sqlite3
 import sys
 import tempfile
@@ -273,8 +274,15 @@ def cmd_log(args):
     entries = _all_entries(conn)
     conn.close()
     hits = sorted((e for e in entries if matches(e, args)), key=lambda x: x.ts, reverse=True)
-    for e in hits:
+    # Output is newest-first, so a limit keeps the newest. Limited by default because
+    # the usual reader is a script or an agent with a context window, and an unfiltered
+    # `wl log` is the entire history in one write. Never a silent cap: the tail line
+    # says what was withheld.
+    shown = hits[:args.limit] if args.limit > 0 else hits
+    for e in shown:
         print(f"{e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] {e.body} (refs: {fmt_refs(e.refs)})")
+    if len(hits) > len(shown):
+        print(f"... and {len(hits) - len(shown)} more (--limit 0 for all)")
 
 
 def iso_week(day):
@@ -394,6 +402,9 @@ def cmd_slug(args):
 
 
 def main(argv=None):
+    # `wl log | head` is a normal thing to type: die on SIGPIPE the way any other
+    # CLI does, rather than printing a BrokenPipeError traceback over the output.
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     p = argparse.ArgumentParser(prog="wl", description="SQLite-backed work log.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -419,8 +430,10 @@ def main(argv=None):
         sp.add_argument("--since")
         sp.add_argument("--until")
 
-    g = sub.add_parser("log", help="filtered list across all history")
+    g = sub.add_parser("log", help="filtered list across all history, newest first")
     add_filter_args(g)
+    g.add_argument("-n", "--limit", type=int, default=20,
+                   help="show only the newest N; 0 for all (default 20)")
     g.set_defaults(fn=cmd_log)
 
     st = sub.add_parser("stats", help="counts by type, slug, ISO week and ticket")
