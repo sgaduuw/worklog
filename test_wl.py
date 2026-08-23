@@ -548,6 +548,73 @@ def test_write_md_refuses_a_render_it_cannot_read_back():
         assert md.read_text() == before
 
 
+def test_root_resolution():
+    saved = {k: os.environ.get(k) for k in ("WORKLOG_ROOT", "XDG_DATA_HOME")}
+    try:
+        os.environ["WORKLOG_ROOT"] = "/tmp/explicit"
+        assert wl.root() == pathlib.Path("/tmp/explicit")
+        # WORKLOG_ROOT wins over XDG, so an explicit choice is never second-guessed.
+        os.environ["XDG_DATA_HOME"] = "/tmp/xdg"
+        assert wl.root() == pathlib.Path("/tmp/explicit")
+        del os.environ["WORKLOG_ROOT"]
+        assert wl.root() == pathlib.Path("/tmp/xdg/worklog")
+        del os.environ["XDG_DATA_HOME"]
+        # The fallback is the XDG default, not the tool's own directory: once wl is
+        # installed, the old expression pointed into site-packages.
+        assert wl.root() == pathlib.Path.home() / ".local/share/worklog"
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_root_is_created_on_demand():
+    with tempfile.TemporaryDirectory() as d:
+        target = pathlib.Path(d, "not", "there", "yet")
+        os.environ["WORKLOG_ROOT"] = str(target)
+        try:
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:00", body="first ever entry"))
+            assert (target / "work_log.md").exists()
+            assert (target / "work_log.db").exists()
+        finally:
+            del os.environ["WORKLOG_ROOT"]
+
+
+def test_legacy_log_warning():
+    with worklog_root() as d, \
+            tempfile.TemporaryDirectory() as xdg, \
+            tempfile.TemporaryDirectory() as chosen:
+        # A legacy log next to the tool, and nothing at the new default, is exactly the
+        # trap: without a warning the tool starts an empty log and abandons the real one.
+        # XDG_DATA_HOME is pinned to an empty tempdir rather than left unset: with it
+        # unset, db_path() falls through to the *real* machine's default location, so
+        # this test would silently stop exercising the warning on any machine that has
+        # already adopted the new default (db_path().exists() would be True there).
+        del os.environ["WORKLOG_ROOT"]
+        os.environ["XDG_DATA_HOME"] = xdg
+        try:
+            legacy = pathlib.Path(d, "work_log.db")
+            legacy.write_bytes(b"")
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                wl.warn_if_legacy_log_ignored(legacy_root=pathlib.Path(d))
+            out = buf.getvalue()
+            assert "WORKLOG_ROOT=" in out and str(d) in out
+            # Silent when the caller has already chosen a root. `chosen` is a fresh,
+            # empty tempdir with no work_log.db of its own, so this can only pass
+            # because of the WORKLOG_ROOT check, not incidentally via db_path().exists().
+            os.environ["WORKLOG_ROOT"] = chosen
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                wl.warn_if_legacy_log_ignored(legacy_root=pathlib.Path(d))
+            assert buf.getvalue() == ""
+        finally:
+            os.environ.pop("XDG_DATA_HOME", None)
+            os.environ["WORKLOG_ROOT"] = d
+
+
 if __name__ == "__main__":
     tests = sorted(n for n in dir() if n.startswith("test_"))
     for name in tests:

@@ -165,9 +165,49 @@ CREATE TABLE IF NOT EXISTS slugs(
 """
 
 
+# ponytail: the pre-0.5 default was the tool's own parent directory. Kept only to warn
+# people off it; delete this constant and warn_if_legacy_log_ignored() once nobody is
+# running a pre-0.5 layout. Note the package split changes what this expression means.
+_LEGACY_ROOT = Path(__file__).resolve().parent.parent
+
+
+def data_dir():
+    """Where the log lives when WORKLOG_ROOT is unset.
+
+    XDG rather than beside the tool: once `wl` is installed from a package the old
+    expression resolves into site-packages, and it silently relocated the log whenever
+    the source layout changed, which is a data-loss shape rather than an inconvenience.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME")
+    return Path(xdg) / "worklog" if xdg else Path.home() / ".local" / "share" / "worklog"
+
+
 def root():
     env = os.environ.get("WORKLOG_ROOT")
-    return Path(env) if env else Path(__file__).resolve().parent.parent
+    return Path(env) if env else data_dir()
+
+
+def ensure_root():
+    """The root may not exist yet: the XDG default usually does not on a first run."""
+    r = root()
+    r.mkdir(parents=True, exist_ok=True)
+    return r
+
+
+def warn_if_legacy_log_ignored(legacy_root=None):
+    """Point at a pre-0.5 log this install would otherwise ignore, and keep going.
+
+    Non-fatal on purpose: a genuine first run has no legacy log and must not be blocked,
+    and moving somebody's only copy of their data unasked is worse than telling them
+    where it is.
+    """
+    if os.environ.get("WORKLOG_ROOT") or db_path().exists():
+        return
+    legacy = (legacy_root or _LEGACY_ROOT) / "work_log.db"
+    if legacy.exists():
+        print(f"warning: {legacy} holds a log this install ignores. "
+              f"Set WORKLOG_ROOT={legacy.parent} to keep using it, "
+              f"or move it to {root()}.", file=sys.stderr)
 
 
 def md_path():
@@ -192,6 +232,7 @@ def _import_into(conn):
 
 def connect():
     """Open the DB, ensure schema, and re-import the markdown if it is newer (or DB missing)."""
+    ensure_root()
     db = db_path()
     stale = (not db.exists()) or (
         md_path().exists() and md_path().stat().st_mtime > db.stat().st_mtime
@@ -457,6 +498,7 @@ def cmd_slug(args):
 
 
 def main(argv=None):
+    warn_if_legacy_log_ignored()
     # `wl log | head` is a normal thing to type: die on SIGPIPE the way any other
     # CLI does, rather than printing a BrokenPipeError traceback over the output.
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
