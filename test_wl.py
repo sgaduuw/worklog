@@ -651,6 +651,48 @@ def test_rm_on_the_last_entry_empties_the_export():
         assert "only entry" not in text
 
 
+def test_edit_changes_one_field_at_a_time():
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-1",
+                       at="2026-07-01T09:00", body="before"))
+
+        def edit(**kw):
+            base = {"id": 1, "slug": None, "type": None, "ref": None,
+                    "at": None, "body": None}
+            base.update(kw)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.cmd_edit(_NS(**base))
+            return buf.getvalue()
+
+        assert "after" in edit(body="after")
+        assert "decision" in edit(type="decision")
+        text = pathlib.Path(d, "work_log.md").read_text()
+        assert "after" in text and "before" not in text and "[decision]" in text
+        # Untouched fields keep their values.
+        assert "PROJ-1" in edit(at="2026-07-02T10:00")
+        assert "2026-07-02" in pathlib.Path(d, "work_log.md").read_text()
+        # The same validation as `add`, so an edit cannot write what add refuses.
+        for kw in ({"slug": "two words"}, {"ref": "PROJ-1)"},
+                   {"type": "nonsense"}, {"at": "99:99"}):
+            try:
+                edit(**kw)
+                raise AssertionError(f"expected SystemExit for {kw}")
+            except SystemExit as ex:
+                assert ex.code not in (0, None), ex.code
+        # Nothing to change is an error, not a silent no-op.
+        try:
+            edit()
+            raise AssertionError("expected SystemExit when no field was given")
+        except SystemExit as ex:
+            assert "nothing" in str(ex.code).lower(), ex.code
+        try:
+            edit(id=999, body="x")
+            raise AssertionError("expected SystemExit for an unknown id")
+        except SystemExit as ex:
+            assert "999" in str(ex.code), ex.code
+
+
 def test_import_force_scans_before_it_deletes():
     """`--force` on a non-empty database must not delete before it knows the file is readable.
 

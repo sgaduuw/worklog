@@ -397,6 +397,50 @@ def cmd_rm(args):
           f"(refs: {fmt_refs(e.refs)})")
 
 
+def cmd_edit(args):
+    """Change named fields of one entry, validating exactly as `add` does.
+
+    Sharing the checks is the point: an edit that could write a slug `add` refuses would
+    put an entry in the database that the export cannot represent.
+    """
+    fields = {}
+    if args.slug is not None:
+        check_slug(args.slug)
+        fields["slug"] = args.slug
+    if args.type is not None:
+        if args.type not in TYPES:
+            sys.exit(f"error: bad --type {args.type!r}; valid: {', '.join(TYPES)}")
+        fields["type"] = args.type
+    if args.ref is not None:
+        refs = normalize_refs(args.ref)
+        check_refs(refs)
+        fields["refs"] = refs
+    if args.at is not None:
+        try:
+            fields["ts"] = resolve_at(args.at)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
+    if args.body is not None:
+        fields["body"] = args.body.replace("\n", " ").strip()
+    if not fields:
+        sys.exit("error: nothing to change; pass at least one of "
+                 "--slug, --type, --ref, --at, --body")
+    conn = connect()
+    if not conn.execute("SELECT 1 FROM entries WHERE id = ?", (args.id,)).fetchone():
+        conn.close()
+        sys.exit(f"error: no entry with id {args.id}")
+    assignments = ", ".join(f"{k} = ?" for k in fields)
+    conn.execute(f"UPDATE entries SET {assignments} WHERE id = ?",
+                 (*fields.values(), args.id))
+    conn.commit()
+    export_md(conn)
+    row = conn.execute("SELECT ts,slug,type,refs,body,id FROM entries WHERE id = ?",
+                       (args.id,)).fetchone()
+    conn.close()
+    e = Entry(*row)
+    print(f"{e.id} {e.ts[:16]} [{e.slug}] [{e.type}] {e.body} (refs: {fmt_refs(e.refs)})")
+
+
 def cmd_report(args):
     conn = connect()
     order = known_slugs(conn)
@@ -638,6 +682,15 @@ def main(argv=None):
     rm = sub.add_parser("rm", help="delete one entry by id (see `wl log`)")
     rm.add_argument("id", type=int)
     rm.set_defaults(fn=cmd_rm)
+
+    ed = sub.add_parser("edit", help="change fields of one entry by id")
+    ed.add_argument("id", type=int)
+    ed.add_argument("--slug")
+    ed.add_argument("--type")
+    ed.add_argument("--ref")
+    ed.add_argument("--at", help="HH:MM (today) or YYYY-MM-DDTHH:MM")
+    ed.add_argument("--body")
+    ed.set_defaults(fn=cmd_edit)
 
     st = sub.add_parser("stats", help="counts by type, slug, ISO week and ticket")
     add_filter_args(st)
