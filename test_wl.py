@@ -127,28 +127,54 @@ def test_render_custom_order():
     assert out.index("### general") < out.index("### backend") < out.index("### infra")
 
 
-def test_import_and_stale_reimport():
+def test_the_database_is_authoritative():
     with worklog_root() as d:
-        md = os.path.join(d, "work_log.md")
-        with open(md, "w") as f:
-            f.write(
-                "# Work Log\n\n## 2026-06-30\n\n### general\n"
-                "- 09:15 [note] first entry (refs: none)\n"
-            )
-        conn = wl.connect()                       # DB missing -> imports md
-        rows = wl._all_entries(conn)
-        assert len(rows) == 1 and rows[0].body == "first entry", rows
-        conn.close()
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="from the database"))
+        md = pathlib.Path(d, "work_log.md")
+        # Mangle the export, and make it newer than the DB so the old staleness check
+        # would have re-imported it. Nothing may read it back.
+        md.write_text("# Work Log\n\n## 2026-07-01\n\n### general\n"
+                      "- 09:00 [note] from the markdown (refs: none)\n")
+        os.utime(md, (9e9, 9e9))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_log(_NS(slug=None, type=None, ref=None, since=None,
+                           until=None, limit=0))
+        out = buf.getvalue()
+        assert "from the database" in out
+        assert "from the markdown" not in out
+        # And a render overwrites the mangled file rather than absorbing it.
+        wl.cmd_render(_NS())
+        assert "from the database" in md.read_text()
+        assert "from the markdown" not in md.read_text()
 
-        # hand-edit the markdown so it is newer than the DB
-        import time
-        time.sleep(0.05)
-        with open(md, "a") as f:
-            f.write("- 10:00 [note] second entry (refs: none)\n")
-        conn = wl.connect()                       # md newer -> re-imports
-        rows = wl._all_entries(conn)
-        assert len(rows) == 2, rows
-        conn.close()
+
+def test_import_is_gated_and_loud():
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text("# Work Log\n\n## 2026-07-01\n\n### general\n"
+                      "- 09:00 [note] good line (refs: none)\n"
+                      "- 09:01 [note oops unparseable\n"
+                      "- not even a timestamp\n")
+        # An empty database imports, and says what it could not read.
+        buf, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(buf), redirect_stderr(err):
+                wl.cmd_import(_NS(force=False))
+            raise AssertionError("expected a non-zero exit when lines were dropped")
+        except SystemExit as ex:
+            assert ex.code not in (0, None), ex.code
+        assert "(1 entries)" in buf.getvalue(), buf.getvalue()
+        # Line 6 is the good entry; 7 and 8 are the two that must be reported.
+        assert "line 7" in err.getvalue(), err.getvalue()
+        assert "line 8" in err.getvalue(), err.getvalue()
+        # A non-empty database is not clobbered without --force.
+        try:
+            wl.cmd_import(_NS(force=False))
+            raise AssertionError("expected SystemExit on a non-empty database")
+        except SystemExit as ex:
+            assert "--force" in str(ex.code), ex.code
 
 
 def test_add_and_report():
@@ -468,7 +494,8 @@ def test_log_survives_a_closed_pipe():
             f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n{lines}")
         script = pathlib.Path(__file__).resolve().parent / "wl"
         proc = subprocess.run(
-            ["sh", "-c", f'"{sys.executable}" "{script}" log --limit 0 | head -1'],
+            ["sh", "-c", f'"{sys.executable}" "{script}" import >/dev/null && '
+                         f'"{sys.executable}" "{script}" log --limit 0 | head -1'],
             capture_output=True, text=True, env={**os.environ, "WORKLOG_ROOT": d},
             check=False,
         )
@@ -519,7 +546,7 @@ def test_add_rejects_parens_in_refs():
             assert ex.code not in (0, None), ex.code
 
 
-def test_write_md_refuses_a_render_it_cannot_read_back():
+def test_export_refuses_a_render_it_cannot_read_back():
     """The backstop: whatever slips past the input checks must not reach the file.
 
     work_log.md is the source of record and every command re-imports it when it is
@@ -538,7 +565,7 @@ def test_write_md_refuses_a_render_it_cannot_read_back():
                      ("2026-07-01T10:00", "my project", "note", "", "doomed"))
         conn.commit()
         try:
-            wl.write_md(conn)
+            wl.export_md(conn)
             raise AssertionError("expected the round-trip check to refuse the write")
         except SystemExit as ex:
             assert "my project" in str(ex.code), ex.code

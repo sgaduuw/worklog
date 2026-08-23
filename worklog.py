@@ -91,10 +91,17 @@ _SLUG_RE = re.compile(r"^### (\S+)\s*$")
 _ENTRY_RE = re.compile(r"^- (\d{2}:\d{2}) \[(\w+)\] (.*?)(?:\s*\(refs:\s*([^()]*)\))?\s*$")
 
 
-def parse_markdown(text):
-    """Parse a rendered work_log.md back into Entry rows. Header and pre-day lines ignored."""
-    entries, day, slug = [], None, None
-    for line in text.splitlines():
+_CANDIDATE_RE = re.compile(r"^- ")
+
+
+def scan_markdown(text):
+    """Parse a rendered export, and report the lines that looked like entries but were not.
+
+    A dropped line used to be silent, which is how a hand-edited file could delete an
+    entry nobody noticed. Returns (entries, skipped) with skipped as [(lineno, line)].
+    """
+    entries, skipped, day, slug = [], [], None, None
+    for n, line in enumerate(text.splitlines(), 1):
         m = _DAY_RE.match(line)
         if m:
             day, slug = m.group(1), None
@@ -108,7 +115,14 @@ def parse_markdown(text):
             hhmm, typ, body, refs = m.groups()
             refs = "" if not refs or refs.strip().lower() == "none" else normalize_refs(refs)
             entries.append(Entry(f"{day}T{hhmm}:00", slug, typ, refs, body.rstrip()))
-    return entries
+        elif _CANDIDATE_RE.match(line):
+            skipped.append((n, line))
+    return entries, skipped
+
+
+def parse_markdown(text):
+    """Entries only. Use scan_markdown when the dropped lines matter."""
+    return scan_markdown(text)[0]
 
 
 HEADER_BLOCK = (
@@ -250,35 +264,35 @@ def db_path():
 
 
 def _import_into(conn):
-    """Rebuild the entries table from work_log.md (source of record)."""
+    """Rebuild the entries table from the export. Returns (imported, skipped).
+
+    This is the rescue path, not part of the normal loop: the database is the source of
+    record and the markdown is derived from it. It stays because the export is the only
+    human-readable copy, so it is what a lost database is rebuilt from.
+    """
     conn.execute("DELETE FROM entries")
     md = md_path()
-    if md.exists():
-        rows = [(e.ts, e.slug, e.type, e.refs, e.body) for e in parse_markdown(md.read_text())]
-        conn.executemany(
-            "INSERT INTO entries(ts,slug,type,refs,body) VALUES(?,?,?,?,?)", rows
-        )
+    entries, skipped = scan_markdown(md.read_text()) if md.exists() else ([], [])
+    conn.executemany("INSERT INTO entries(ts,slug,type,refs,body) VALUES(?,?,?,?,?)",
+                     [(e.ts, e.slug, e.type, e.refs, e.body) for e in entries])
     conn.commit()
+    return len(entries), skipped
 
 
 def connect():
-    """Open the DB, ensure schema, and re-import the markdown if it is newer (or DB missing)."""
+    """Open the database, migrating it if needed. The markdown is never read back here.
+
+    Inverted on 2026-08-23: the database is the source of record and work_log.md is an
+    export. Re-importing on an mtime comparison is what let a malformed line, a slug
+    with a space, or a body ending in "(refs: ...)" delete or corrupt entries.
+    """
     ensure_root()
-    db = db_path()
-    stale = (not db.exists()) or (
-        md_path().exists() and md_path().stat().st_mtime > db.stat().st_mtime
-    )
-    conn = sqlite3.connect(str(db))
+    conn = sqlite3.connect(str(db_path()))
     conn.execute("PRAGMA busy_timeout = 5000")
     migrate(conn)
-    # ponytail: slugs live in the DB, not work_log.md, so they are machine-local
-    # tooling config, not portable log content. A from-scratch `wl import` reseeds
-    # to just 'general'. Add a slug export to the markdown only if that ever bites.
     if not conn.execute("SELECT 1 FROM slugs LIMIT 1").fetchone():
         conn.execute("INSERT INTO slugs(name, pos) VALUES('general', 0)")
         conn.commit()
-    if stale:
-        _import_into(conn)
     return conn
 
 
@@ -297,13 +311,13 @@ def _roundtrip_key(e):
     return (e.ts[:16], e.slug, e.type, e.refs, e.body)
 
 
-def write_md(conn):
-    """Render all entries and atomically replace work_log.md, if it reads back intact.
+def export_md(conn):
+    """Render every entry and atomically replace work_log.md, if it reads back intact.
 
-    work_log.md is the source of record and every command re-imports it once it is
-    newer than the DB, so anything the renderer writes that parse_markdown cannot read
-    back is permanent loss, and silent. Cheaper to verify the round trip here than to
-    guess at every character that might break it.
+    The export is derived, so a refused write costs a stale file rather than data. It is
+    still verified, because `wl import` parses this file and it is what a lost database
+    is rebuilt from: an export that cannot be read back is an export that cannot rescue
+    anything.
     """
     entries = _all_entries(conn)
     text = render_markdown(entries, known_slugs(conn))
@@ -313,8 +327,8 @@ def write_md(conn):
         listing = "\n".join(f"  {ts} [{slug}] [{typ}] {body[:60]}"
                             for ts, slug, typ, _, body in lost)
         sys.exit(f"error: work_log.md not replaced; {len(lost)} entr"
-                 f"{'y' if len(lost) == 1 else 'ies'} would not survive re-import:\n{listing}\n"
-                 "The DB now disagrees with the file; `wl import` resyncs from the file.")
+                 f"{'y' if len(lost) == 1 else 'ies'} would not survive `wl import`:\n{listing}\n"
+                 "The database is unaffected. Fix the entry with `wl edit`, then `wl render`.")
     target = md_path()
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     with os.fdopen(fd, "w") as f:
@@ -342,7 +356,7 @@ def cmd_add(args):
         (ts, args.slug, args.type, refs, body),
     )
     conn.commit()
-    write_md(conn)
+    export_md(conn)
     conn.close()
     print(f"- {ts[11:16]} [{args.type}] {body} (refs: {fmt_refs(refs)})")
 
@@ -480,17 +494,27 @@ def cmd_stats(args):
 
 def cmd_render(args):
     conn = connect()
-    write_md(conn)
+    export_md(conn)
     conn.close()
     print(f"rendered {md_path()}")
 
 
 def cmd_import(args):
     conn = connect()
-    _import_into(conn)  # force a rebuild even if connect() considered the DB fresh
     n = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+    if n and not args.force:
+        conn.close()
+        sys.exit(f"error: {db_path()} already holds {n} entries and is the source of "
+                 "record. `wl import` rebuilds it from work_log.md and is a rescue "
+                 "path, not a sync. Pass --force if that is what you want.")
+    imported, skipped = _import_into(conn)
     conn.close()
-    print(f"imported {md_path()} -> {db_path()} ({n} entries)")
+    print(f"imported {md_path()} -> {db_path()} ({imported} entries)")
+    if skipped:
+        for lineno, line in skipped:
+            print(f"warning: line {lineno} not read: {line[:90]}", file=sys.stderr)
+        sys.exit(f"error: {len(skipped)} line(s) looked like entries and were not "
+                 "imported. Fix them in work_log.md and import again.")
 
 
 def cmd_slug(args):
@@ -574,7 +598,9 @@ def main(argv=None):
     rn = sub.add_parser("render", help="regenerate work_log.md from the DB")
     rn.set_defaults(fn=cmd_render)
 
-    im = sub.add_parser("import", help="rebuild the DB from work_log.md")
+    im = sub.add_parser("import", help="rescue: rebuild the DB from work_log.md")
+    im.add_argument("--force", action="store_true",
+                    help="allow rebuilding over a database that already has entries")
     im.set_defaults(fn=cmd_import)
 
     sl = sub.add_parser("slug", help="manage project slugs (ls/add/rm)")
