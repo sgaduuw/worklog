@@ -431,6 +431,29 @@ def test_log_limit():
         assert "oldest" in out and "more" not in out
 
 
+def test_log_ref_matches_body_mentions():
+    with worklog_root():
+        wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-9",
+                       at="2026-07-01T09:00", body="in the refs column"))
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T10:00", body="mentioned PROJ-9 in prose only"))
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T11:00", body="mentioned PROJ-10, a longer key"))
+
+        def run(ref):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.cmd_log(_NS(slug=None, type=None, ref=ref, since=None,
+                               until=None, limit=0))
+            return buf.getvalue()
+
+        out = run("PROJ-9")
+        assert "refs column" in out and "prose only" in out
+        # Whole keys only, in the body as in the refs column: PROJ-9 is not PROJ-10.
+        assert "longer key" not in out
+        assert "longer key" in run("PROJ-10")
+
+
 def test_log_survives_a_closed_pipe():
     """`wl log --limit 0 | head -1` must exit quietly, not print a traceback.
 

@@ -63,7 +63,9 @@ export WORKLOG_ROOT="$HOME/notes"
   with `wl slug add` (see [Managing slugs](#managing-slugs)). An unregistered slug
   still logs, but warns and sorts after the registered ones.
 - `--type`: one of `ticket`, `pr`, `idea`, `decision`, `blocker`, `note`.
-- `--ref` (optional): comma-separated keys, e.g. `PROJ-12,PROJ-13`.
+- `--ref` (optional): comma-separated keys, e.g. `PROJ-12,PROJ-13`. On `wl log` and
+  `wl stats`, `--ref` matches whole keys in this column *and* in the entry body, so a
+  ticket named only in prose is still found. `PROJ-1` never matches `PROJ-10`.
 - `--at` (optional): `HH:MM` (today) or `YYYY-MM-DDTHH:MM` (past day). Defaults to now.
 
 ## Managing slugs
@@ -99,7 +101,8 @@ immediately, run `wl import`.
 
 `wl log` filters by slug, type, ref, and date, prints newest first, and shows the
 newest 20 by default (`-n N`, or `-n 0` for all) with a tail line counting what it
-withheld. For free-text search over the entry bodies, grep the export:
+withheld. A ticket key is found whether it sits in `--ref` or only in the body. For
+any other free-text search, grep the export:
 
 ```sh
 grep -i hugepages work_log.md

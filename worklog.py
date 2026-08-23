@@ -254,6 +254,16 @@ def cmd_report(args):
     print(render_days(sel, order))
 
 
+def ref_matches(ref, e):
+    """True if `ref` is in the refs column, or named as a whole key in the body.
+
+    Whole keys in both places, so PROJ-1 never matches PROJ-10. The body is searched
+    because entries routinely name a ticket in prose without filling --ref, and those
+    mentions were unreachable by `wl log --ref`.
+    """
+    return ref in e.refs.split(",") or re.search(rf"\b{re.escape(ref)}\b", e.body) is not None
+
+
 def matches(e, args):
     """Shared --slug/--type/--ref/--since/--until filter for `log` and `stats`.
 
@@ -263,7 +273,7 @@ def matches(e, args):
     return not (
         (args.slug and e.slug != args.slug)
         or (args.type and e.type != args.type)
-        or (args.ref and args.ref not in e.refs.split(","))
+        or (args.ref and not ref_matches(args.ref, e))
         or (args.since and e.ts[:10] < args.since)
         or (args.until and e.ts[:10] > args.until)
     )
