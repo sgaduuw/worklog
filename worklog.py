@@ -59,6 +59,24 @@ def normalize_refs(s):
     return ",".join(p.strip() for p in s.split(",") if p.strip())
 
 
+def check_slug(name):
+    """Exit unless the slug survives a render/parse cycle: '### name', read back as \\S+.
+
+    A slug with whitespace renders a heading the parser cannot see, and since the
+    importer clears the table first, every entry under it disappears on the next
+    command rather than at some later point a reader might notice.
+    """
+    if not re.fullmatch(r"\S+", name):
+        sys.exit(f"error: slug {name!r} must be one word with no whitespace, "
+                 "or entries under it are dropped when work_log.md is re-imported")
+
+
+def check_refs(refs):
+    """Exit on parens in refs: they close the '(refs: ...)' suffix early on re-import."""
+    if set("()") & set(refs):
+        sys.exit(f"error: refs {refs!r} may not contain parentheses")
+
+
 def fmt_refs(refs):
     """Stored 'PROJ-1,PROJ-2' -> display 'PROJ-1, PROJ-2'; '' -> 'none'."""
     return refs.replace(",", ", ") if refs else "none"
@@ -66,9 +84,12 @@ def fmt_refs(refs):
 
 _DAY_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
 _SLUG_RE = re.compile(r"^### (\S+)\s*$")
-# body is non-greedy so the optional trailing refs suffix is not swallowed.
-# ponytail: a body literally ending in "(refs: ...)" would mis-parse; no real entry does this.
-_ENTRY_RE = re.compile(r"^- (\d{2}:\d{2}) \[(\w+)\] (.*?)(?:\s*\(refs:\s*(.*?)\))?\s*$")
+# body is non-greedy so the optional trailing refs suffix is not swallowed. The refs
+# group cannot span a paren, so it takes the LAST "(refs: ...)" on the line and a body
+# that itself ends in "(refs: FM-1)" keeps it. It used to take the first, which ate the
+# tail of the 2026-06-22 17:18 entry in the real log and left it holding
+# refs = "FM-4357) (refs: FM-4359"; the next import of that line now repairs it.
+_ENTRY_RE = re.compile(r"^- (\d{2}:\d{2}) \[(\w+)\] (.*?)(?:\s*\(refs:\s*([^()]*)\))?\s*$")
 
 
 def parse_markdown(text):
@@ -199,9 +220,27 @@ def known_slugs(conn):
     return [r[0] for r in conn.execute("SELECT name FROM slugs ORDER BY pos")]
 
 
+def _roundtrip_key(e):
+    """Entry identity for comparison, minus the seconds the markdown does not render."""
+    return (e.ts[:16], e.slug, e.type, e.refs, e.body)
+
+
 def write_md(conn):
-    """Render all entries and atomically replace work_log.md."""
-    text = render_markdown(_all_entries(conn), known_slugs(conn))
+    """Render all entries and atomically replace work_log.md, if it reads back intact.
+
+    work_log.md is the source of record and every command re-imports it once it is
+    newer than the DB, so anything the renderer writes that parse_markdown cannot read
+    back is permanent loss, and silent. Cheaper to verify the round trip here than to
+    guess at every character that might break it.
+    """
+    entries = _all_entries(conn)
+    text = render_markdown(entries, known_slugs(conn))
+    lost = sorted(set(map(_roundtrip_key, entries)) - set(map(_roundtrip_key, parse_markdown(text))))
+    if lost:
+        listing = "\n".join(f"  {ts} [{slug}] [{typ}] {body[:60]}" for ts, slug, typ, _, body in lost)
+        sys.exit(f"error: work_log.md not replaced; {len(lost)} entr"
+                 f"{'y' if len(lost) == 1 else 'ies'} would not survive re-import:\n{listing}\n"
+                 "The DB now disagrees with the file; `wl import` resyncs from the file.")
     target = md_path()
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     with os.fdopen(fd, "w") as f:
@@ -216,7 +255,9 @@ def cmd_add(args):
         ts = resolve_at(args.at)
     except ValueError as e:
         sys.exit(f"error: {e}")
+    check_slug(args.slug)
     refs = normalize_refs(args.ref)
+    check_refs(refs)
     body = args.body.replace("\n", " ").strip()
     conn = connect()
     if args.slug not in known_slugs(conn):
@@ -386,6 +427,7 @@ def cmd_slug(args):
         if not args.name:
             conn.close()
             sys.exit("error: `slug add` needs a name")
+        check_slug(args.name)
         # pos = one past the current max, so new slugs append to the display order.
         cur = conn.execute(
             "INSERT OR IGNORE INTO slugs(name, pos) "

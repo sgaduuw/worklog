@@ -474,6 +474,79 @@ def test_log_survives_a_closed_pipe():
         assert proc.stderr == "", proc.stderr
 
 
+
+def test_a_refs_shaped_body_survives_the_round_trip():
+    """A body that itself ends in "(refs: ...)" must not be parsed away.
+
+    This is not hypothetical: the 2026-06-22 17:18 entry in the real log had its tail
+    moved into the refs column, leaving refs = 'FM-4357) (refs: FM-4359'.
+    """
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="FM-2",
+                       at="2026-07-01T09:00", body="closed it (refs: FM-1)"))
+        text = (pathlib.Path(d) / "work_log.md").read_text()
+        entries = wl.parse_markdown(text)
+        assert len(entries) == 1, entries
+        assert entries[0].body == "closed it (refs: FM-1)", entries[0].body
+        assert entries[0].refs == "FM-2", entries[0].refs
+
+
+def test_add_rejects_a_slug_the_parser_cannot_read_back():
+    with worklog_root():
+        for name in ("my project", "", "two words"):
+            try:
+                wl.cmd_add(_NS(slug=name, type="note", ref="",
+                               at="2026-07-01T09:00", body="doomed"))
+                assert False, f"expected SystemExit for slug {name!r}"
+            except SystemExit as ex:
+                assert ex.code not in (0, None), ex.code
+        # `slug add` guards the same alphabet, so the registry cannot hold one either.
+        try:
+            wl.main(["slug", "add", "my project"])
+            assert False, "expected SystemExit"
+        except SystemExit as ex:
+            assert ex.code not in (0, None), ex.code
+
+
+def test_add_rejects_parens_in_refs():
+    with worklog_root():
+        try:
+            wl.cmd_add(_NS(slug="general", type="note", ref="FM-1)",
+                           at="2026-07-01T09:00", body="x"))
+            assert False, "expected SystemExit"
+        except SystemExit as ex:
+            assert ex.code not in (0, None), ex.code
+
+
+def test_write_md_refuses_a_render_it_cannot_read_back():
+    """The backstop: whatever slips past the input checks must not reach the file.
+
+    work_log.md is the source of record and every command re-imports it when it is
+    newer, so an entry the parser cannot read back is permanent, silent loss.
+    """
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="keeper"))
+        md = pathlib.Path(d) / "work_log.md"
+        before = md.read_text()
+        conn = wl.connect()
+        # Inserted behind cmd_add's back, the way a hand-edited DB or a future bug
+        # would: "### my project" is not readable by _SLUG_RE, so on the next import
+        # every entry under that heading would be dropped.
+        conn.execute("INSERT INTO entries(ts,slug,type,refs,body) VALUES(?,?,?,?,?)",
+                     ("2026-07-01T10:00", "my project", "note", "", "doomed"))
+        conn.commit()
+        try:
+            wl.write_md(conn)
+            assert False, "expected the round-trip check to refuse the write"
+        except SystemExit as ex:
+            assert "my project" in str(ex.code), ex.code
+        finally:
+            conn.close()
+        # The file on disk is untouched, so nothing that was safe got lost either.
+        assert md.read_text() == before
+
+
 if __name__ == "__main__":
     tests = sorted(n for n in dir() if n.startswith("test_"))
     for name in tests:

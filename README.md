@@ -59,13 +59,15 @@ export WORKLOG_ROOT="$HOME/notes"
 
 ### Fields
 
-- `--slug`: project bucket. `general` is the one built-in slug. Register your own
+- `--slug`: project bucket, one word with no whitespace (it becomes a markdown
+  heading that has to read back). `general` is the one built-in slug. Register your own
   with `wl slug add` (see [Managing slugs](#managing-slugs)). An unregistered slug
   still logs, but warns and sorts after the registered ones.
 - `--type`: one of `ticket`, `pr`, `idea`, `decision`, `blocker`, `note`.
 - `--ref` (optional): comma-separated keys, e.g. `PROJ-12,PROJ-13`. On `wl log` and
   `wl stats`, `--ref` matches whole keys in this column *and* in the entry body, so a
-  ticket named only in prose is still found. `PROJ-1` never matches `PROJ-10`.
+  ticket named only in prose is still found. `PROJ-1` never matches `PROJ-10`. No
+  parentheses: they would close the `(refs: ...)` suffix early on re-import.
 - `--at` (optional): `HH:MM` (today) or `YYYY-MM-DDTHH:MM` (past day). Defaults to now.
 
 ## Managing slugs
@@ -96,6 +98,13 @@ the editable source of record. Open it in your editor, fix or delete the line, a
 save. The next `wl` command re-imports the markdown (it re-imports whenever the
 file is newer than the DB), so your change is picked up automatically. To force it
 immediately, run `wl import`.
+
+Because the markdown is the source of record, anything written to it that the parser
+cannot read back would be lost on that re-import, silently. So `wl` renders the file,
+parses it back, and compares before replacing anything: if an entry would not survive,
+it refuses to write and names the entry. Note the guard runs on write, not on import,
+so a hand-edit that breaks a line is still dropped when the file is read back. Keep
+entry lines in the shape `- HH:MM [type] body (refs: ...)`.
 
 ## Searching
 
