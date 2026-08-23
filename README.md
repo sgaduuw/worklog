@@ -188,9 +188,10 @@ the ruff version in `ci.yml`, so the gate is the same on any machine.
 
 ## Version history
 
-Grouped by milestone; see `git log` for the full commit-level detail.
+Grouped by milestone; see `git log` for the full commit-level detail, and
+`RELEASING.md` for how a version gets cut.
 
-- **0.5** `wl stats`: counts by type, slug, ISO week and ref, `--when` for weekday
+- **0.5 (unreleased; no `v0.5` tag yet)** `wl stats`: counts by type, slug, ISO week and ref, `--when` for weekday
   and hour. `wl log` shows the newest 20 by default (`-n`, `-n 0` for all) and exits
   quietly on a closed pipe. `--ref` also matches ticket keys named only in an entry
   body. The markdown round trip is verified before the file is replaced, and slugs or
