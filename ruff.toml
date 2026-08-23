@@ -1,0 +1,12 @@
+# Pinned so the lint gate is identical here, on another machine and in CI. Without a
+# config in the repo the ruleset comes from whatever the developer's environment
+# happens to enable, which made "the existing findings" a number nobody could
+# reproduce. Keep the version in ci.yml in step with whatever you run locally.
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "DTZ", "EXE", "RUF"]
+# A work log records when its user did something, in the timezone they did it in, and
+# `wl report --day today` means today where they are. Aware datetimes would add a field
+# that nothing in the tool or the markdown reads back.
+ignore = ["DTZ001", "DTZ005", "DTZ007"]

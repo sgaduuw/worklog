@@ -10,5 +10,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
-      # No dependencies to install: worklog is stdlib-only.
+      # worklog itself is stdlib-only; ruff is a lint-time tool. Its version is pinned
+      # so a new release cannot turn a green branch red on its own, and the ruleset
+      # lives in ruff.toml so it is the same here as on any developer's machine.
+      - run: pip install ruff==0.16.4 && ruff check .
       - run: python3 test_wl.py

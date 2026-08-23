@@ -37,7 +37,7 @@ def test_resolve_at():
                 "99:99", "24:00", "2026-13-45T00:00", "2026-06-29T25:61"):
         try:
             wl.resolve_at(bad)
-            assert False, f"expected ValueError for {bad!r}"
+            raise AssertionError(f"expected ValueError for {bad!r}")
         except ValueError:
             pass
 
@@ -155,7 +155,7 @@ def test_add_and_report():
     with worklog_root() as d:
         wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-1, PROJ-2",
                        at="2026-06-30T09:00", body="hello world"))
-        text = open(os.path.join(d, "work_log.md")).read()
+        text = pathlib.Path(d, "work_log.md").read_text()
         assert "## 2026-06-30" in text
         assert "- 09:00 [note] hello world (refs: PROJ-1, PROJ-2)" in text
         buf = io.StringIO()
@@ -170,7 +170,7 @@ def test_add_body_sanitized():
     with worklog_root() as d:
         wl.cmd_add(_NS(slug="general", type="note", ref="",
                        at="2026-07-01T09:00", body="  line one\nline two  "))
-        text = open(os.path.join(d, "work_log.md")).read()
+        text = pathlib.Path(d, "work_log.md").read_text()
         # flattened to one line and stripped of surrounding whitespace
         assert "- 09:00 [note] line one line two (refs: none)" in text
 
@@ -185,7 +185,8 @@ def test_log_filters():
                        at="2026-07-01T09:00", body="gamma"))
 
         def run(**kw):
-            base = dict(slug=None, type=None, ref=None, since=None, until=None, limit=0)
+            base = {"slug": None, "type": None, "ref": None,
+                    "since": None, "until": None, "limit": 0}
             base.update(kw)
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -290,7 +291,7 @@ def test_report_range():
             wl.cmd_add(_NS(slug="general", type="note", ref="", at=at, body=body))
 
         def report(**kw):
-            base = dict(day="today", since=None, until=None)
+            base = {"day": "today", "since": None, "until": None}
             base.update(kw)
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -325,7 +326,7 @@ def test_main_add():
             wl.main(["add", "--slug", "general", "--type", "pr",
                      "--ref", "PROJ-9", "--at", "2026-06-30T12:00", "did a thing"])
         assert "- 12:00 [pr] did a thing (refs: PROJ-9)" in buf.getvalue()
-        text = open(os.path.join(d, "work_log.md")).read()
+        text = pathlib.Path(d, "work_log.md").read_text()
         assert "did a thing" in text
 
 
@@ -337,7 +338,7 @@ def test_validation_exits():
         ):
             try:
                 wl.main(argv)
-                assert False, f"expected SystemExit for {argv}"
+                raise AssertionError(f"expected SystemExit for {argv}")
             except SystemExit as ex:
                 assert ex.code not in (0, None), ex.code
 
@@ -349,7 +350,7 @@ def test_add_unknown_slug_warns_but_logs():
             wl.main(["add", "--slug", "mystery", "--type", "note",
                      "--at", "2026-07-01T09:00", "still logged"])
         assert "unknown slug" in err.getvalue()          # typo guard fired
-        text = open(os.path.join(d, "work_log.md")).read()
+        text = pathlib.Path(d, "work_log.md").read_text()
         assert "still logged" in text                    # entry written anyway
 
 
@@ -401,7 +402,7 @@ def test_slug_missing_name_exits():
         for argv in (["slug", "add"], ["slug", "rm"]):
             try:
                 wl.main(argv)
-                assert False, f"expected SystemExit for {argv}"
+                raise AssertionError(f"expected SystemExit for {argv}")
             except SystemExit as ex:
                 assert ex.code not in (0, None), ex.code
 
@@ -497,13 +498,13 @@ def test_add_rejects_a_slug_the_parser_cannot_read_back():
             try:
                 wl.cmd_add(_NS(slug=name, type="note", ref="",
                                at="2026-07-01T09:00", body="doomed"))
-                assert False, f"expected SystemExit for slug {name!r}"
+                raise AssertionError(f"expected SystemExit for slug {name!r}")
             except SystemExit as ex:
                 assert ex.code not in (0, None), ex.code
         # `slug add` guards the same alphabet, so the registry cannot hold one either.
         try:
             wl.main(["slug", "add", "my project"])
-            assert False, "expected SystemExit"
+            raise AssertionError("expected SystemExit")
         except SystemExit as ex:
             assert ex.code not in (0, None), ex.code
 
@@ -513,7 +514,7 @@ def test_add_rejects_parens_in_refs():
         try:
             wl.cmd_add(_NS(slug="general", type="note", ref="FM-1)",
                            at="2026-07-01T09:00", body="x"))
-            assert False, "expected SystemExit"
+            raise AssertionError("expected SystemExit")
         except SystemExit as ex:
             assert ex.code not in (0, None), ex.code
 
@@ -538,7 +539,7 @@ def test_write_md_refuses_a_render_it_cannot_read_back():
         conn.commit()
         try:
             wl.write_md(conn)
-            assert False, "expected the round-trip check to refuse the write"
+            raise AssertionError("expected the round-trip check to refuse the write")
         except SystemExit as ex:
             assert "my project" in str(ex.code), ex.code
         finally:

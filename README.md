@@ -8,7 +8,8 @@ source of record, the `.db` is a rebuildable cache: if `work_log.md` changes
 (hand-edit, another session, git pull), the next `wl` command re-imports it
 automatically.
 
-No dependencies beyond the Python 3 standard library.
+No dependencies beyond the Python 3 standard library. Linting uses ruff, which is a
+lint-time tool rather than a runtime one.
 
 ## Install
 
@@ -179,7 +180,11 @@ early. Uses BSD `stat` (macOS); adjust for GNU `stat` on Linux.
 
 ```sh
 python3 test_wl.py
+ruff check .
 ```
+
+CI runs both on every push and pull request. The ruleset is pinned in `ruff.toml` and
+the ruff version in `ci.yml`, so the gate is the same on any machine.
 
 ## Version history
 

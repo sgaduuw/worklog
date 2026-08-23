@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """wl: SQLite-backed work log. work_log.md is a generated export; the DB is queried."""
 import argparse
 import os
@@ -235,9 +234,11 @@ def write_md(conn):
     """
     entries = _all_entries(conn)
     text = render_markdown(entries, known_slugs(conn))
-    lost = sorted(set(map(_roundtrip_key, entries)) - set(map(_roundtrip_key, parse_markdown(text))))
+    survived = set(map(_roundtrip_key, parse_markdown(text)))
+    lost = sorted(k for k in map(_roundtrip_key, entries) if k not in survived)
     if lost:
-        listing = "\n".join(f"  {ts} [{slug}] [{typ}] {body[:60]}" for ts, slug, typ, _, body in lost)
+        listing = "\n".join(f"  {ts} [{slug}] [{typ}] {body[:60]}"
+                            for ts, slug, typ, _, body in lost)
         sys.exit(f"error: work_log.md not replaced; {len(lost)} entr"
                  f"{'y' if len(lost) == 1 else 'ies'} would not survive re-import:\n{listing}\n"
                  "The DB now disagrees with the file; `wl import` resyncs from the file.")
@@ -331,7 +332,8 @@ def cmd_log(args):
     # says what was withheld.
     shown = hits[:args.limit] if args.limit > 0 else hits
     for e in shown:
-        print(f"{e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] {e.body} (refs: {fmt_refs(e.refs)})")
+        print(f"{e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] "
+              f"{e.body} (refs: {fmt_refs(e.refs)})")
     if len(hits) > len(shown):
         print(f"... and {len(hits) - len(shown)} more (--limit 0 for all)")
 
