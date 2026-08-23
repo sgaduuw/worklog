@@ -23,6 +23,7 @@ class Entry(NamedTuple):
     type: str
     refs: str  # comma-joined keys, '' if none
     body: str
+    id: int = None  # database identity; None for entries parsed out of the export
 
 
 _HHMM = re.compile(r"\d{2}:\d{2}")
@@ -297,7 +298,7 @@ def connect():
 
 
 def _all_entries(conn):
-    rows = conn.execute("SELECT ts,slug,type,refs,body FROM entries").fetchall()
+    rows = conn.execute("SELECT ts,slug,type,refs,body,id FROM entries").fetchall()
     return [Entry(*r) for r in rows]
 
 
@@ -372,6 +373,30 @@ def cmd_add(args):
     print(f"- {ts[11:16]} [{args.type}] {body} (refs: {fmt_refs(refs)})")
 
 
+def cmd_rm(args):
+    """Delete one entry by id, printing it in full first.
+
+    No confirmation prompt: prompts break non-interactive callers, which is most of
+    them here. Printing the entry is what makes a mistake recoverable, by eye.
+    """
+    conn = connect()
+    row = conn.execute("SELECT ts,slug,type,refs,body,id FROM entries WHERE id = ?",
+                       (args.id,)).fetchone()
+    if not row:
+        conn.close()
+        sys.exit(f"error: no entry with id {args.id}")
+    e = Entry(*row)
+    conn.execute("DELETE FROM entries WHERE id = ?", (args.id,))
+    conn.commit()
+    # allow_empty=True: `wl rm` is the one legitimate way to empty the log, by
+    # removing the last remaining entry, and export_md's data-loss guard (Task 3)
+    # would otherwise refuse to write an empty export over a populated file.
+    export_md(conn, allow_empty=True)
+    conn.close()
+    print(f"removed {e.id}: {e.ts[:16]} [{e.slug}] [{e.type}] {e.body} "
+          f"(refs: {fmt_refs(e.refs)})")
+
+
 def cmd_report(args):
     conn = connect()
     order = known_slugs(conn)
@@ -430,7 +455,7 @@ def cmd_log(args):
     # says what was withheld.
     shown = hits[:args.limit] if args.limit > 0 else hits
     for e in shown:
-        print(f"{e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] "
+        print(f"{e.id} {e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] "
               f"{e.body} (refs: {fmt_refs(e.refs)})")
     if len(hits) > len(shown):
         print(f"... and {len(hits) - len(shown)} more (--limit 0 for all)")
@@ -609,6 +634,10 @@ def main(argv=None):
     g.add_argument("-n", "--limit", type=int, default=20,
                    help="show only the newest N; 0 for all (default 20)")
     g.set_defaults(fn=cmd_log)
+
+    rm = sub.add_parser("rm", help="delete one entry by id (see `wl log`)")
+    rm.add_argument("id", type=int)
+    rm.set_defaults(fn=cmd_rm)
 
     st = sub.add_parser("stats", help="counts by type, slug, ISO week and ticket")
     add_filter_args(st)

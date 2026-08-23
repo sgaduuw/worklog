@@ -481,6 +481,19 @@ def test_log_ref_matches_body_mentions():
         assert "longer key" in run("PROJ-10")
 
 
+def test_log_shows_ids():
+    with worklog_root():
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="addressable"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_log(_NS(slug=None, type=None, ref=None, since=None,
+                           until=None, limit=0))
+        # The id has to be visible, because it is the only way to name an entry for
+        # `wl edit` and `wl rm`.
+        assert buf.getvalue().split()[0] == "1", buf.getvalue()
+
+
 def test_log_survives_a_closed_pipe():
     """`wl log --limit 0 | head -1` must exit quietly, not print a traceback.
 
@@ -600,6 +613,42 @@ def test_export_refuses_to_empty_an_existing_log():
         wl.export_md(conn, allow_empty=True)
         assert "only entry" not in md.read_text()
         conn.close()
+
+
+def test_rm_removes_one_entry_and_updates_the_export():
+    with worklog_root() as d:
+        for body in ("keeper", "doomed"):
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:00", body=body))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_rm(_NS(id=2))
+        assert "doomed" in buf.getvalue()   # printed in full, so a mistake is re-addable
+        text = pathlib.Path(d, "work_log.md").read_text()
+        assert "keeper" in text and "doomed" not in text
+        try:
+            wl.cmd_rm(_NS(id=999))
+            raise AssertionError("expected SystemExit for an unknown id")
+        except SystemExit as ex:
+            assert "999" in str(ex.code), ex.code
+
+
+def test_rm_on_the_last_entry_empties_the_export():
+    """Removing the only entry must succeed rather than be refused.
+
+    export_md's data-loss guard (Task 3) refuses to write an empty export over a
+    populated file unless allow_empty=True. `wl rm` is the one legitimate way to reach
+    a genuinely empty log, so cmd_rm must pass allow_empty=True, not the bare call.
+    """
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="only entry"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_rm(_NS(id=1))
+        assert "only entry" in buf.getvalue()
+        text = pathlib.Path(d, "work_log.md").read_text()
+        assert "only entry" not in text
 
 
 def test_import_force_scans_before_it_deletes():
