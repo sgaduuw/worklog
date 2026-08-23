@@ -615,6 +615,42 @@ def test_legacy_log_warning():
             os.environ["WORKLOG_ROOT"] = d
 
 
+def test_migrate_stamps_a_fresh_db():
+    with worklog_root():
+        conn = wl.connect()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == wl.SCHEMA_VERSION
+        conn.close()
+
+
+def test_migrate_adopts_an_unstamped_db_without_losing_rows():
+    with worklog_root():
+        conn = wl.connect()
+        conn.execute("INSERT INTO entries(ts,slug,type,refs,body) VALUES(?,?,?,?,?)",
+                     ("2026-07-01T09:00:00", "general", "note", "", "keeper"))
+        # Pre-migration databases exist in the field stamped 0. Adopting one must be a
+        # stamp, not a rebuild: there is no longer a markdown file to rebuild from.
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+        wl.migrate(conn)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == wl.SCHEMA_VERSION
+        assert conn.execute("SELECT body FROM entries").fetchone()[0] == "keeper"
+        conn.close()
+
+
+def test_migrate_refuses_a_future_schema():
+    with worklog_root():
+        conn = wl.connect()
+        conn.execute(f"PRAGMA user_version = {wl.SCHEMA_VERSION + 1}")
+        conn.commit()
+        try:
+            wl.migrate(conn)
+            raise AssertionError("expected SystemExit on a newer schema")
+        except SystemExit as ex:
+            assert "newer" in str(ex.code), ex.code
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     tests = sorted(n for n in dir() if n.startswith("test_"))
     for name in tests:

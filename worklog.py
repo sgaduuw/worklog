@@ -148,21 +148,52 @@ def render_markdown(entries, order):
     return f"{HEADER_BLOCK}\n\n{body}\n" if body else f"{HEADER_BLOCK}\n"
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS entries(
-  id   INTEGER PRIMARY KEY,
-  ts   TEXT NOT NULL,
-  slug TEXT NOT NULL,
-  type TEXT NOT NULL,
-  refs TEXT NOT NULL DEFAULT '',
-  body TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);
-CREATE TABLE IF NOT EXISTS slugs(
-  name TEXT PRIMARY KEY,
-  pos  INTEGER NOT NULL   -- display order, ascending
-);
-"""
+SCHEMA_VERSION = 1  # bump by one for every script appended to _MIGRATIONS
+
+# Index 0 takes a database from version 0 to 1, index 1 from 1 to 2, and so on. Each
+# script must be safe to run against a database that already has the shape it creates,
+# because a pre-migration DB is adopted by stamping rather than rebuilding.
+#
+# This is deliberately not an ORM: one table, one two-column lookup table, no
+# relationship between them, and no query anywhere that filters or sorts in SQL. A
+# numbered list of statements is smaller than a model layer. Revisit when a second
+# entity with a real relationship appears.
+_MIGRATIONS = (
+    """
+    CREATE TABLE IF NOT EXISTS entries(
+      id   INTEGER PRIMARY KEY,
+      ts   TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      type TEXT NOT NULL,
+      refs TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_entries_ts ON entries(ts);
+    CREATE TABLE IF NOT EXISTS slugs(
+      name TEXT PRIMARY KEY,
+      pos  INTEGER NOT NULL   -- display order, ascending
+    );
+    """,
+)
+
+
+def migrate(conn):
+    """Bring the database up to SCHEMA_VERSION, then stamp it.
+
+    Refusing a newer schema matters more than it looks: the database is the only copy of
+    the data now, so an older build writing against a shape it does not understand is
+    how rows get silently dropped.
+    """
+    have = conn.execute("PRAGMA user_version").fetchone()[0]
+    if have > SCHEMA_VERSION:
+        sys.exit(f"error: {db_path()} was written by a newer wl (schema {have}; this "
+                 f"build knows {SCHEMA_VERSION}). Upgrade wl rather than downgrading the log.")
+    for script in _MIGRATIONS[have:SCHEMA_VERSION]:
+        conn.executescript(script)
+    if have < SCHEMA_VERSION:
+        # PRAGMA will not take a bound parameter, and SCHEMA_VERSION is our own int.
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
 
 
 # ponytail: the pre-0.5 default was the tool's own parent directory. Kept only to warn
@@ -239,7 +270,7 @@ def connect():
     )
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA busy_timeout = 5000")
-    conn.executescript(_SCHEMA)
+    migrate(conn)
     # ponytail: slugs live in the DB, not work_log.md, so they are machine-local
     # tooling config, not portable log content. A from-scratch `wl import` reseeds
     # to just 'general'. Add a slug export to the markdown only if that ever bites.
