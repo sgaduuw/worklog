@@ -215,6 +215,70 @@ def test_log_filters():
         assert "alpha" in out and "beta" in out and "gamma" not in out
 
 
+def test_iso_week():
+    # ISO weeks, so 2026-01-01 (a Thursday) belongs to week 1 of 2026 ...
+    assert wl.iso_week("2026-01-01") == "2026-W01"
+    # ... but 2027-01-01 (a Friday) still belongs to week 53 of 2026, which is
+    # exactly where strftime %W would have disagreed.
+    assert wl.iso_week("2027-01-01") == "2026-W53"
+    assert wl.iso_week("2026-08-13") == "2026-W33"
+
+
+def test_stats_counts_and_filters():
+    with worklog_root():
+        wl.cmd_add(_NS(slug="general", type="note", ref="PROJ-1,PROJ-2",
+                       at="2026-06-30T09:00", body="alpha"))
+        wl.cmd_add(_NS(slug="backend", type="pr", ref="PROJ-2",
+                       at="2026-06-30T10:00", body="beta"))
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-06T09:00", body="gamma"))
+
+        def run(**kw):
+            base = {"slug": None, "type": None, "ref": None,
+                    "since": None, "until": None, "top": 10, "when": False}
+            base.update(kw)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                wl.cmd_stats(_NS(**base))
+            return buf.getvalue()
+
+        out = run()
+        assert "3 entries, 2026-06-30 to 2026-07-06" in out
+        assert "note  2" in out and "pr    1" in out
+        # PROJ-2 is cited by two entries, PROJ-1 by one: refs count per mention.
+        assert "PROJ-2  2" in out and "PROJ-1  1" in out
+        # Two distinct days one week apart must land in two different ISO weeks.
+        assert "2026-W27" in out and "2026-W28" in out
+
+        # The shared filter applies here exactly as it does to `log`.
+        out = run(slug="backend")
+        assert "1 entries" in out and "PROJ-1" not in out
+
+        # An empty selection reports rather than dividing by zero on the widths.
+        assert run(slug="nonexistent") == "(no entries)\n"
+
+        # --top truncates and says how many it hid.
+        out = run(top=1)
+        assert "PROJ-2  1" in out or "PROJ-2  2" in out
+        assert "... and 1 more" in out
+
+        # --when is opt-in and adds clock-order blocks. 2026-06-30 is a Tuesday and
+        # 2026-07-06 a Monday, so both must appear with Mon printed before Tue.
+        assert "by weekday" not in run()
+        out = run(when=True)
+        assert "by hour" in out
+        assert out.index("Mon") < out.index("Tue")
+        assert "Wed" not in out  # weekdays with no entries are omitted, not zero-filled
+
+
+def test_bar_scaling():
+    # The largest row fills the width; a non-zero row never renders empty, which is
+    # what keeps a 1-of-500 count visible instead of silently blank.
+    assert wl._bar(10, 10, width=8) == "█" * 8
+    assert wl._bar(1, 1000, width=8) == "█"
+    assert wl._bar(0, 10, width=8) == ""
+
+
 def test_report_range():
     with worklog_root():
         for at, body in (("2026-07-01T09:00", "day one"),

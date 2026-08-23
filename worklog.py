@@ -6,11 +6,13 @@ import re
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime
+from collections import Counter
+from datetime import date, datetime
 from pathlib import Path
 from typing import NamedTuple
 
 TYPES = ("ticket", "pr", "idea", "decision", "blocker", "note")
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")  # date.weekday() order
 # Project slugs are managed at runtime (`wl slug add/rm/ls`) and stored in the DB,
 # not in this file. `known_slugs(conn)` returns them in display order.
 
@@ -251,27 +253,95 @@ def cmd_report(args):
     print(render_days(sel, order))
 
 
+def matches(e, args):
+    """Shared --slug/--type/--ref/--since/--until filter for `log` and `stats`.
+
+    Phrased as "keep unless some filter excludes it" so an unset filter is simply
+    falsy and drops out, rather than needing a branch of its own.
+    """
+    return not (
+        (args.slug and e.slug != args.slug)
+        or (args.type and e.type != args.type)
+        or (args.ref and args.ref not in e.refs.split(","))
+        or (args.since and e.ts[:10] < args.since)
+        or (args.until and e.ts[:10] > args.until)
+    )
+
+
 def cmd_log(args):
     conn = connect()
     entries = _all_entries(conn)
     conn.close()
-
-    def keep(e):
-        if args.slug and e.slug != args.slug:
-            return False
-        if args.type and e.type != args.type:
-            return False
-        if args.ref and args.ref not in e.refs.split(","):
-            return False
-        if args.since and e.ts[:10] < args.since:
-            return False
-        if args.until and e.ts[:10] > args.until:
-            return False
-        return True
-
-    hits = sorted((e for e in entries if keep(e)), key=lambda x: x.ts, reverse=True)
+    hits = sorted((e for e in entries if matches(e, args)), key=lambda x: x.ts, reverse=True)
     for e in hits:
         print(f"{e.ts[:10]} {e.ts[11:16]} [{e.slug}] [{e.type}] {e.body} (refs: {fmt_refs(e.refs)})")
+
+
+def iso_week(day):
+    """'YYYY-MM-DD' -> 'YYYY-Www' ISO week label, e.g. '2026-W33'.
+
+    ISO weeks, not strftime %W, because the team counts weeks that way everywhere
+    else (brag doc, sprint names), and the two disagree around New Year.
+    """
+    y, w, _ = date.fromisoformat(day).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _counts(values):
+    """Descending (value, count) pairs. Ties break on name so output is stable."""
+    return sorted(Counter(values).items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _bar(n, mx, width=24):
+    """Proportional bar, scaled to the largest row. A non-zero count always gets at
+    least one block, so a small-but-present value never renders as absent."""
+    return "█" * max(1, round(n / mx * width)) if n else ""
+
+
+def _print_block(title, pairs, limit=None):
+    """One aligned 'name count bar' block, in the order given. Silent when empty.
+
+    Rows are never re-sorted here: chronological blocks (week, weekday, hour) rely
+    on the caller's order, and sorting by size would hide the gaps that matter.
+    """
+    if not pairs:
+        return
+    rows = pairs[:limit] if limit else pairs
+    width = max(len(k) for k, _ in rows)
+    nwidth = max(len(str(n)) for _, n in rows)
+    mx = max(n for _, n in rows)
+    print(f"\n{title}")
+    for name, n in rows:
+        print(f"  {name:<{width}}  {n:>{nwidth}}  {_bar(n, mx)}")
+    if limit and len(pairs) > limit:
+        print(f"  ... and {len(pairs) - limit} more")
+
+
+def cmd_stats(args):
+    conn = connect()
+    entries = _all_entries(conn)
+    conn.close()
+    sel = [e for e in entries if matches(e, args)]
+    if not sel:
+        print("(no entries)")
+        return
+    days = sorted(e.ts[:10] for e in sel)
+    print(f"{len(sel)} entries, {days[0]} to {days[-1]}")
+    _print_block("by type", _counts(e.type for e in sel))
+    _print_block("by slug", _counts(e.slug for e in sel))
+    # Weeks sort chronologically rather than by size: the shape of the run over time
+    # is the point, and a busiest-first list hides gaps.
+    _print_block("by week", sorted(Counter(iso_week(e.ts[:10]) for e in sel).items()))
+    # One entry can cite several tickets, so refs are counted per mention, not per entry.
+    refs = [r for e in sel for r in e.refs.split(",") if r]
+    _print_block(f"top refs (of {len(set(refs))})", _counts(refs), limit=args.top)
+    if getattr(args, "when", False):
+        # Both blocks read in clock order, not by size: the question is when the work
+        # happens, so an empty Friday or a busy midnight has to sit where it falls.
+        dow = Counter(date.fromisoformat(e.ts[:10]).weekday() for e in sel)
+        _print_block("by weekday", [(WEEKDAYS[i], dow[i]) for i in range(7) if dow[i]])
+        # Hours are only listed when used, so a normal day is ~10 rows rather than 24.
+        _print_block("by hour", sorted(Counter(e.ts[11:13] for e in sel).items()))
 
 
 def cmd_render(args):
@@ -341,13 +411,24 @@ def main(argv=None):
     r.add_argument("--until", help="range end YYYY-MM-DD, inclusive")
     r.set_defaults(fn=cmd_report)
 
+    def add_filter_args(sp):
+        """The --slug/--type/--ref/--since/--until set, shared by `log` and `stats`."""
+        sp.add_argument("--slug")
+        sp.add_argument("--type")
+        sp.add_argument("--ref")
+        sp.add_argument("--since")
+        sp.add_argument("--until")
+
     g = sub.add_parser("log", help="filtered list across all history")
-    g.add_argument("--slug")
-    g.add_argument("--type")
-    g.add_argument("--ref")
-    g.add_argument("--since")
-    g.add_argument("--until")
+    add_filter_args(g)
     g.set_defaults(fn=cmd_log)
+
+    st = sub.add_parser("stats", help="counts by type, slug, ISO week and ticket")
+    add_filter_args(st)
+    st.add_argument("--top", type=int, default=10, help="how many refs to list; default 10")
+    st.add_argument("--when", action="store_true",
+                    help="also break down by weekday and hour of day")
+    st.set_defaults(fn=cmd_stats)
 
     rn = sub.add_parser("render", help="regenerate work_log.md from the DB")
     rn.set_defaults(fn=cmd_render)
