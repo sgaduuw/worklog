@@ -575,6 +575,67 @@ def test_export_refuses_a_render_it_cannot_read_back():
         assert md.read_text() == before
 
 
+def test_export_refuses_to_empty_an_existing_log():
+    """An empty database must not overwrite an export that still holds entries.
+
+    connect() never re-imports now, so an empty root.mv'd-in-a-populated-work_log.md, or
+    a database wiped by hand, would otherwise have the very next `wl add`/`wl render`
+    replace the file with a bare header, silently, with nothing left to recover from.
+    """
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="only entry"))
+        md = pathlib.Path(d, "work_log.md")
+        before = md.read_text()
+        conn = wl.connect()
+        conn.execute("DELETE FROM entries")
+        conn.commit()
+        try:
+            wl.export_md(conn)
+            raise AssertionError("expected SystemExit: DB empty, file holds entries")
+        except SystemExit as ex:
+            assert "wl import" in str(ex.code), ex.code
+        assert md.read_text() == before
+        # The one legitimate way to empty the log (Task 4's `wl rm`) opts in explicitly.
+        wl.export_md(conn, allow_empty=True)
+        assert "only entry" not in md.read_text()
+        conn.close()
+
+
+def test_import_force_scans_before_it_deletes():
+    """`--force` on a non-empty database must not delete before it knows the file is readable.
+
+    The old order committed the DELETE and the parseable subset before reporting what it
+    skipped, so on a non-empty database an unparseable line took its DB row down with it
+    and the message telling the reader to fix the file and import again was already false.
+    """
+    with worklog_root() as d:
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="already in the db"))
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text("# Work Log\n\n## 2026-07-01\n\n### general\n"
+                      "- 09:00 [note] good line (refs: none)\n"
+                      "- 09:01 [note oops unparseable\n")
+        try:
+            wl.cmd_import(_NS(force=True))
+            raise AssertionError("expected SystemExit before anything was deleted")
+        except SystemExit as ex:
+            assert "delete" in str(ex.code), ex.code
+        conn = wl.connect()
+        rows = wl._all_entries(conn)
+        assert len(rows) == 1 and rows[0].body == "already in the db", rows
+        conn.close()
+
+        # Once the file is clean, --force does its job.
+        md.write_text("# Work Log\n\n## 2026-07-01\n\n### general\n"
+                      "- 09:00 [note] fresh (refs: none)\n")
+        wl.cmd_import(_NS(force=True))
+        conn = wl.connect()
+        rows = wl._all_entries(conn)
+        assert len(rows) == 1 and rows[0].body == "fresh", rows
+        conn.close()
+
+
 def test_root_resolution():
     saved = {k: os.environ.get(k) for k in ("WORKLOG_ROOT", "XDG_DATA_HOME")}
     try:

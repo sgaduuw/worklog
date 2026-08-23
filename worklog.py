@@ -311,15 +311,27 @@ def _roundtrip_key(e):
     return (e.ts[:16], e.slug, e.type, e.refs, e.body)
 
 
-def export_md(conn):
+def export_md(conn, allow_empty=False):
     """Render every entry and atomically replace work_log.md, if it reads back intact.
 
     The export is derived, so a refused write costs a stale file rather than data. It is
     still verified, because `wl import` parses this file and it is what a lost database
     is rebuilt from: an export that cannot be read back is an export that cannot rescue
     anything.
+
+    Refuses to replace a populated file with an empty one unless allow_empty=True: an
+    empty database is far more often a missing `work_log.db` (a fresh root, a wiped file)
+    than a genuinely empty log, and connect() no longer re-imports to recover from that.
+    The one legitimate way to reach a real zero, deleting the last entry, opts in.
     """
     entries = _all_entries(conn)
+    target = md_path()
+    existing_has_entries = target.exists() and scan_markdown(target.read_text())[0]
+    if not entries and not allow_empty and existing_has_entries:
+        sys.exit(f"error: {target} holds entries but the database is empty; refusing to "
+                 "overwrite it and lose them. If the database is genuinely empty this "
+                 "run is safe to repeat with allow_empty; otherwise `wl import` rebuilds "
+                 "it from this file.")
     text = render_markdown(entries, known_slugs(conn))
     survived = set(map(_roundtrip_key, parse_markdown(text)))
     lost = sorted(k for k in map(_roundtrip_key, entries) if k not in survived)
@@ -329,7 +341,6 @@ def export_md(conn):
         sys.exit(f"error: work_log.md not replaced; {len(lost)} entr"
                  f"{'y' if len(lost) == 1 else 'ies'} would not survive `wl import`:\n{listing}\n"
                  "The database is unaffected. Fix the entry with `wl edit`, then `wl render`.")
-    target = md_path()
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
     with os.fdopen(fd, "w") as f:
         f.write(text)
@@ -507,6 +518,17 @@ def cmd_import(args):
         sys.exit(f"error: {db_path()} already holds {n} entries and is the source of "
                  "record. `wl import` rebuilds it from work_log.md and is a rescue "
                  "path, not a sync. Pass --force if that is what you want.")
+    if n:
+        # --force on a non-empty database: scan before anything is deleted. A skipped
+        # line here is an entry only the DB holds, and the rebuild below would not
+        # restore it no matter what the file is fixed to say afterwards.
+        md = md_path()
+        _, skipped = scan_markdown(md.read_text()) if md.exists() else ([], [])
+        if skipped:
+            conn.close()
+            sys.exit(f"error: work_log.md has {len(skipped)} line(s) that do not parse; "
+                     f"--force would delete the {n} entries already in {db_path()} to "
+                     "rebuild from an incomplete read. Fix work_log.md, then import again.")
     imported, skipped = _import_into(conn)
     conn.close()
     print(f"imported {md_path()} -> {db_path()} ({imported} entries)")
