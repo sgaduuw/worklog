@@ -636,8 +636,9 @@ def test_export_refuses_a_render_it_cannot_read_back():
 def test_export_refuses_to_shrink_an_existing_log():
     """A database holding fewer entries than the export must not overwrite it.
 
-    The count is what matters, not emptiness. A root that has work_log.md but no
-    work_log.db is the common case now that the default root is XDG (a fresh machine, a
+    Emptiness is not the trigger: what refuses is the file holding entries the
+    database does not, whatever either side's total. A root that has work_log.md but
+    no work_log.db is the common case now that the default root is XDG (a fresh machine, a
     checkout carrying only the markdown), and `wl render` there used to replace a
     five-entry file with the header alone, exit 0, and say nothing.
     """
@@ -653,8 +654,9 @@ def test_export_refuses_to_shrink_an_existing_log():
         except SystemExit as ex:
             assert "wl import" in str(ex.code), ex.code
         assert md.read_text() == before
-        # Adopt the file, and the same render is simply correct: equal counts never
-        # refuse, or the guard would make the tool unusable rather than safe.
+        # Adopt the file, and the same render is simply correct: once both copies hold
+        # the same entries there is nothing left to lose, and a guard that refused
+        # anyway would make the tool unusable rather than safe.
         with redirect_stdout(io.StringIO()):
             wl.cmd_import(_NS(force=False))
             wl.cmd_render(_NS())
@@ -899,6 +901,47 @@ def test_a_long_refusal_listing_is_capped():
         assert md.read_text() == before, md.read_text()
 
 
+def test_rm_and_edit_refuse_an_export_holding_an_orphan():
+    """The guard on `wl rm` and `wl edit` has to be asserted, not merely present.
+
+    Either call could be deleted with the rest of the suite green. `wl rm` is half the
+    reason the guard exists: it re-renders from a database about to hold one row fewer,
+    so a line living only in the export goes out with the row.
+    """
+    with worklog_root() as d:
+        with redirect_stdout(io.StringIO()):
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:00", body="in both copies"))
+        conn = wl.connect()
+        entry_id = wl._all_entries(conn)[0].id
+        conn.close()
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text(f"{md.read_text()}- 09:09 [note] ONLY IN THE FILE (refs: none)\n")
+        before = md.read_text()
+        commands = (
+            ("rm", lambda: wl.cmd_rm(_NS(id=entry_id))),
+            ("edit", lambda: wl.cmd_edit(_NS(id=entry_id, slug=None, type=None,
+                                             ref=None, at=None, body="a new wording"))),
+        )
+        for name, call in commands:
+            raised = False
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    call()
+            except SystemExit as ex:
+                raised = True
+                assert "ONLY IN THE FILE" in str(ex.code), (name, ex.code)
+            if not raised:
+                raise AssertionError(f"`wl {name}` overwrote an export holding an orphan")
+            # Neither copy touched: the file still has the orphan and the row is still
+            # there to remove once the reader has chosen which copy to keep.
+            assert md.read_text() == before, (name, md.read_text())
+            conn = wl.connect()
+            rows = wl._all_entries(conn)
+            conn.close()
+            assert [e.body for e in rows] == ["in both copies"], (name, rows)
+
+
 def test_identical_entries_are_not_collapsed_by_the_guard():
     """Two byte-identical entries are two entries on both sides of the comparison.
 
@@ -940,8 +983,8 @@ def test_identical_entries_are_not_collapsed_by_the_guard():
 def test_an_unreadable_export_refuses_rather_than_tracebacks():
     """Non-UTF-8 bytes in work_log.md must reach the user as a refusal, not a traceback.
 
-    The count check reads the file on every command that re-renders it, where the read
-    used to happen only against an empty database. An undecodable export made `wl add`
+    The guard reads the file on every command that re-renders it, where the read used
+    to happen only against an empty database. An undecodable export made `wl add`
     die with an unhandled UnicodeDecodeError, and because the row was committed first,
     the export silently stopped tracking the database while the user got a stack trace.
     """
