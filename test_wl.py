@@ -84,12 +84,19 @@ def _sample_entries():
     ]
 
 
-def test_header_does_not_promise_hand_editing():
-    # Casefolded: the header text uses "Hand-edits" (capital H), so a bare
-    # "hand-edit" substring check never matches and the assertion passes
-    # vacuously no matter what the header says.
+def test_header_describes_what_the_tool_does_to_a_hand_edit():
+    """The header is stamped into every export, including logs written years ago.
+
+    It said hand-edits were "ignored and overwritten on the next render", which is true
+    of a deletion and of nothing else: the export is read back before every write, and a
+    line the database cannot account for refuses the command. The assertion that stood
+    here pinned that false claim ("hand-edit" not in text or "ignored" in text), so
+    correcting the sentence would have turned the suite red.
+    """
     text = wl.HEADER_BLOCK.casefold()
-    assert "hand-edit" not in text or "ignored" in text
+    assert "hand-edit" in text, wl.HEADER_BLOCK
+    assert "ignored" not in text, wl.HEADER_BLOCK
+    assert "refused" in text, wl.HEADER_BLOCK
     assert "wl edit" in wl.HEADER_BLOCK
 
 
@@ -1097,7 +1104,10 @@ def test_edit_changes_one_field_at_a_time():
         assert "[decision] carriage return (refs" in pathlib.Path(d, "work_log.md").read_text()
         edit(body="after")
         text = pathlib.Path(d, "work_log.md").read_text()
-        assert "after" in text and "before" not in text and "[decision]" in text
+        # The entry lines, not the whole file: a substring check over the file also
+        # reads the header, so it passed or failed on the header's prose.
+        assert [ln for ln in text.splitlines() if ln.startswith("- ")] == [
+            "- 09:00 [decision] after (refs: PROJ-1)"], text
         # Untouched fields keep their values.
         assert "PROJ-1" in edit(at="2026-07-02T10:00")
         assert "2026-07-02" in pathlib.Path(d, "work_log.md").read_text()
@@ -1430,6 +1440,39 @@ def test_a_refusal_listing_shows_the_newest_entries_first():
         # withheld the five newest instead.
         assert "entry 04" not in msg and "entry 00" not in msg, msg
         assert "... and 5 more" in msg, msg
+
+
+def test_a_rendered_line_the_parser_skips_never_reaches_disk():
+    """A line starting with "- " in the header would refuse every write, forever.
+
+    The guard counts a line that looks like an entry and does not parse as an entry at
+    stake. One in HEADER_BLOCK is written by the first render and read back by the next
+    command, which refuses; the refusal's own advice (delete work_log.md, run
+    `wl render`) writes the same header straight back. Only read commands survive. The
+    check belongs where the file is written, so the whole class is impossible rather
+    than merely tested.
+    """
+    with worklog_root() as d:
+        with redirect_stdout(io.StringIO()):
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:00", body="in both copies"))
+        md = pathlib.Path(d, "work_log.md")
+        before = md.read_text()
+        original, wrote, caught = wl.HEADER_BLOCK, False, None
+        wl.HEADER_BLOCK = f"{original}\n\n- a bullet in the header"
+        conn = wl.connect()
+        try:
+            wl.export_md(conn)
+            wrote = True
+        except AssertionError as ex:
+            caught = str(ex)
+        finally:
+            conn.close()
+            wl.HEADER_BLOCK = original
+        if wrote:
+            raise AssertionError("a header line the parser skips was written to disk")
+        assert "cannot read back" in caught, caught
+        assert md.read_text() == before, md.read_text()
 
 if __name__ == "__main__":
     tests = sorted(n for n in dir() if n.startswith("test_"))

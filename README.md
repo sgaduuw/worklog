@@ -135,12 +135,11 @@ mistake is recoverable by eye:
 
 `work_log.md` is not a repair path: the export is rewritten from the database on every
 `wl add`, `wl edit`, `wl rm` and `wl render`, so a hand-edit that only deletes a line is
-put straight back. A hand-edit that adds or rewrites one is refused instead, because the
-file then holds an entry the database does not, and so is one that leaves a line the
-parser cannot read back, because that line would go from both copies. `wl import` exists
-to rebuild
-`work_log.db` from `work_log.md`; it is a rescue tool for a lost or corrupted database,
-not part of the normal loop.
+put straight back. A hand-edit that adds or rewrites one is refused instead: the file
+then holds an entry the database does not, and rewriting the file from the database
+would take that line with it. A hand-edit the parser cannot read back is refused for the
+same reason. `wl import` exists to rebuild `work_log.db` from `work_log.md`; it is a
+rescue tool for a lost or corrupted database, not part of the normal loop.
 
 No command overwrites the export while the export holds entries the database does not.
 The comparison is by entry identity, not by count, so a line rewritten in place is
@@ -247,9 +246,9 @@ Grouped by milestone; see `git log` for the full commit-level detail, and
 
 - **0.5 (unreleased; no `v0.5` tag yet)** The storage inversion, plus the stats and
   search work that preceded it.
-  - `work_log.db` is the source of record and `work_log.md` a generated export, never
-    read back during normal operation. A hand-edit to the markdown is put back on the
-    next render, or refused when putting it back would cost an entry.
+  - `work_log.db` is the source of record and `work_log.md` a generated export, read
+    back before every write purely to check it. A hand-edit to the markdown is put back
+    on the next render, or refused when putting it back would cost an entry.
     Change entries with `wl edit` and delete them with `wl rm`, naming them by the id
     `wl log` now prints.
   - `wl import` is an explicit rescue path rather than a sync. It rebuilds the database
