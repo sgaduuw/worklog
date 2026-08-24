@@ -999,6 +999,37 @@ def test_edit_unknown_slug_warns_but_edits():
         assert "### mystery" in pathlib.Path(d, "work_log.md").read_text()
 
 
+def test_import_force_lists_the_rows_it_drops():
+    """`wl import --force` deletes rows the file does not hold, so it must name them first.
+
+    It is the last way to lose an entry by following the tool's own advice: every other
+    path refuses, and this one cannot without making --force useless. Printing them is
+    what makes the loss recoverable by eye, the same bargain `wl rm` makes.
+    """
+    with worklog_root() as d:
+        for body in ("kept by the file", "ONLY IN THE DATABASE"):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at="2026-07-01T09:00", body=body))
+        md = pathlib.Path(d, "work_log.md")
+        # Same number of lines, one of them different: the file is the copy to keep, so
+        # the import proceeds, and the row it replaces is gone from both copies.
+        md.write_text(md.read_text().replace("ONLY IN THE DATABASE", "TYPED INTO THE FILE"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_import(_NS(force=True))
+        out = buf.getvalue()
+        assert "ONLY IN THE DATABASE" in out, out
+        assert "dropping 1 entry" in out, out
+        # Only what is actually lost: the entry both copies hold is not at risk and
+        # listing it would bury the one that is.
+        assert "kept by the file" not in out, out
+        conn = wl.connect()
+        bodies = sorted(e.body for e in wl._all_entries(conn))
+        conn.close()
+        assert bodies == ["TYPED INTO THE FILE", "kept by the file"], bodies
+
+
 def test_import_force_scans_before_it_deletes():
     """`--force` on a non-empty database must not delete before it knows the file is readable.
 

@@ -154,7 +154,9 @@ while both copies still agree.
 In the other direction, `wl import` refuses a database that already holds entries unless
 you pass `--force`, and refuses, before deleting anything, a missing `work_log.md`, a
 file that reads back as fewer entries than the database already holds, and a file with a
-line that looks like an entry and does not parse, reporting every such line.
+line that looks like an entry and does not parse, reporting every such line. Rows that
+`--force` does delete and not replace are printed before they go, the way `wl rm` prints
+what it removed, so the loss is recoverable by eye.
 
 ## Searching
 
@@ -247,7 +249,8 @@ Grouped by milestone; see `git log` for the full commit-level detail, and
   - `wl import` is an explicit rescue path rather than a sync. It rebuilds the database
     from the export, refuses a database that already holds entries without `--force`,
     and refuses a missing file, a file that reads back as fewer entries than the
-    database holds, or a line that looks like an entry and does not parse.
+    database holds, or a line that looks like an entry and does not parse. Rows
+    `--force` deletes and does not replace are printed before they go.
   - No command overwrites the export while it holds entries the database does not, nor
     when it cannot be read at all. Entries are compared by identity rather than by
     count, so a line rewritten in place is caught as readily as a line added, and the

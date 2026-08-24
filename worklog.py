@@ -729,6 +729,18 @@ def cmd_import(args):
         sys.exit(f"error: {md} holds {len(entries)} entries but {db_path()} already "
                  f"holds {n}; importing would delete the difference. `wl render` writes "
                  "the export from the database if the database is the copy to keep.")
+    # With --force this is the last way left to lose an entry by following the tool's own
+    # advice: the file is allowed to be the copy to keep, and rows it does not hold go.
+    # They cannot be refused without making --force useless, so they go past the eye
+    # first, the way `wl rm` prints what it removed. Not gated on --force: the condition
+    # that matters is rows being deleted and not replaced, and without --force there are
+    # none, because n is zero.
+    dropped = Counter(map(_roundtrip_key, _all_entries(conn))) - Counter(
+        map(_roundtrip_key, entries))
+    if dropped:
+        gone = sum(dropped.values())
+        print(f"dropping {gone} entr{'y' if gone == 1 else 'ies'} {db_path()} holds and "
+              f"{md} does not:\n{_entry_listing(dropped.elements())}")
     imported = _import_into(conn, entries)
     conn.close()
     print(f"imported {md} -> {db_path()} ({imported} entries)")
