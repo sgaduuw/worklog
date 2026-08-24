@@ -1376,6 +1376,61 @@ def test_migrate_refuses_a_future_schema():
             conn.close()
 
 
+def test_import_force_lists_every_row_it_drops():
+    """This listing is the recovery, so it is the one listing that must not be capped.
+
+    The guard's listing and export_md's name entries that are merely at stake: the
+    command refuses and nothing has moved, so a cap costs the reader detail about a file
+    still sitting on disk. These rows are already gone by the time anyone reads the line,
+    and the README calls that loss recoverable by eye. Showing 20 of 25 makes the tool
+    claim a recovery it did not give.
+    """
+    with worklog_root() as d:
+        for i in range(25):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at=f"2026-07-01T09:{i:02d}", body=f"ONLY IN THE DB {i:02d}"))
+        md = pathlib.Path(d, "work_log.md")
+        # Every line rewritten in place, so the file is the copy to keep at equal count
+        # and all 25 rows are deleted and not replaced.
+        md.write_text(md.read_text().replace("ONLY IN THE DB", "TYPED INTO THE FILE"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            wl.cmd_import(_NS(force=True))
+        out = buf.getvalue()
+        assert "dropping 25 entries" in out, out
+        for i in range(25):
+            assert f"ONLY IN THE DB {i:02d}" in out, (i, out)
+        withheld = [ln for ln in out.splitlines() if ln.startswith("  ... and")]
+        assert withheld == [], withheld
+
+
+def test_a_refusal_listing_shows_the_newest_entries_first():
+    """A capped listing sorted ascending hides exactly the line the reader just typed.
+
+    The listing is there so the reader recognises what is at stake, and the entry they
+    are most likely to recognise is the newest one. Newest first is what `wl log` and
+    the export itself already do.
+    """
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text(f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n"
+                      + "".join(f"- 09:{i:02d} [note] entry {i:02d} (refs: none)\n"
+                                for i in range(25)))
+        try:
+            wl.cmd_render(_NS())
+            raise AssertionError("expected SystemExit: 25 entries the database lacks")
+        except SystemExit as ex:
+            msg = str(ex.code)
+        listed = [ln for ln in msg.splitlines() if ln.startswith("  2026-07-01T")]
+        assert len(listed) == 20, msg
+        assert "entry 24" in listed[0], listed[0]
+        assert "entry 05" in listed[-1], listed[-1]
+        # The five withheld are the five oldest, which is the point: an ascending sort
+        # withheld the five newest instead.
+        assert "entry 04" not in msg and "entry 00" not in msg, msg
+        assert "... and 5 more" in msg, msg
+
 if __name__ == "__main__":
     tests = sorted(n for n in dir() if n.startswith("test_"))
     for name in tests:

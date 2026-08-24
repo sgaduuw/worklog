@@ -143,25 +143,25 @@ to rebuild
 not part of the normal loop.
 
 No command overwrites the export while the export holds entries the database does not.
-The comparison is by entry identity, not by count, so a line rewritten in place is caught
-as readily as a line added, and the refusal lists the entries at stake rather than a
-number: the first 20 of them, with a tail line counting the rest, since the usual trigger
-is a missing database and every entry in the file is then at stake. It runs before the
-command writes anything, so a refusal leaves both copies untouched and you still get to
-choose which one to keep: `wl import` to take those entries, or delete `work_log.md` and
-`wl render` to discard them. That covers a root holding `work_log.md` but no
-`work_log.db` (a fresh machine, a checkout carrying only the markdown), and a file
-someone typed a line into, whether or not the line parses: one that does not is reported
-by line number and refused, the same way `wl import` reports it, rather than dropped. An
-export that cannot be read at all is refused for the same reason. `wl rm` needs no
-exception: it is checked before it deletes, while both copies still agree.
+The comparison is by entry identity, not by count, so a line rewritten in place is
+caught as readily as a line added, and the refusal lists the entries at stake rather
+than a number: the newest 20 of them, with a tail line counting the rest, since the
+usual trigger is a missing database and every entry in the file is then at stake. It
+runs before the command writes anything, so a refusal leaves both copies untouched and
+you still get to choose which one to keep: `wl import` to take those entries, or delete
+`work_log.md` and `wl render` to discard them. That covers a root holding `work_log.md`
+but no `work_log.db` (a fresh machine, a checkout carrying only the markdown), and a
+file someone typed a line into, whether or not the line parses: one that does not is
+reported by line number and refused, the same way `wl import` reports it, rather than
+dropped. An export that cannot be read at all is refused for the same reason. `wl rm`
+needs no exception: it is checked before it deletes, while both copies still agree.
 
 In the other direction, `wl import` refuses a database that already holds entries unless
 you pass `--force`, and refuses, before deleting anything, a missing `work_log.md`, a
 file that reads back as fewer entries than the database already holds, and a file with a
 line that looks like an entry and does not parse, reporting every such line. Rows that
-`--force` does delete and not replace are printed before they go, the way `wl rm` prints
-what it removed, so the loss is recoverable by eye.
+`--force` does delete and not replace are all printed before they go, uncapped, the way
+`wl rm` prints what it removed, so the loss really is recoverable by eye.
 
 ## Searching
 
@@ -255,14 +255,15 @@ Grouped by milestone; see `git log` for the full commit-level detail, and
   - `wl import` is an explicit rescue path rather than a sync. It rebuilds the database
     from the export, refuses a database that already holds entries without `--force`,
     and refuses a missing file, a file that reads back as fewer entries than the
-    database holds, or a line that looks like an entry and does not parse. Rows
-    `--force` deletes and does not replace are printed before they go.
+    database holds, or a line that looks like an entry and does not parse. Every row
+    `--force` deletes and does not replace is printed before it goes, uncapped.
   - No command overwrites the export while it holds entries the database does not, nor
     a line that looks like an entry and does not parse, nor when it cannot be read at
     all. Entries are compared by identity rather than by count, so a line rewritten in
     place is caught as readily as a line added, and the refusal names the entries at
-    stake, capped at 20 with a tail counting the rest. The check runs before the command
-    writes, so a refusal costs nothing, and `wl rm` needs no exception to it.
+    stake, newest first, capped at 20 with a tail counting the rest. The check runs
+    before the command writes, so a refusal costs nothing, and `wl rm` needs no
+    exception to it.
   - The schema carries a `PRAGMA user_version` stamp and migrates in place, since the
     database can no longer be rebuilt by deleting it.
   - **Upgrading from 0.4 or earlier:** the default root moved from the directory holding

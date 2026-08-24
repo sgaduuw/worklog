@@ -353,20 +353,25 @@ _LISTING_LIMIT = 20
 def _entry_listing(keys, limit=_LISTING_LIMIT):
     """Round-trip keys as one indented line each: how every refusal names what is at stake.
 
+    Newest first, the order `wl log` and the export itself already use. Ascending spent
+    the 20 lines that fit on the oldest entries, so with 25 orphans the one the reader
+    had just typed was exactly the one behind "... and 5 more".
+
     Sorted here rather than by the caller, so a refusal reads the same whichever set of
     keys produced it, and so a Counter's elements() can be handed over as-is.
 
-    Capped, because the commonest refusal is a missing work_log.db, where every entry in
-    the export is at stake: on a 1062-entry log the message was 1,079 lines and 106 KB on
-    the stderr of a plain `wl add`, and one the reader cannot see is worth no more than
-    the count it replaced. Never a silent cap; the tail says what was withheld, the way
-    `wl log` does.
+    limit=None lists every key. Capped by default, because the commonest refusal is a
+    missing work_log.db, where every entry in the export is at stake: on a 1062-entry log
+    the message was 1,079 lines and 106 KB on the stderr of a plain `wl add`, and one the
+    reader cannot see is worth no more than the count it replaced. Never a silent cap;
+    the tail says what was withheld, the way `wl log` does.
     """
-    ordered = sorted(keys)
+    ordered = sorted(keys, reverse=True)
+    shown = ordered if limit is None else ordered[:limit]
     lines = [f"  {ts} [{slug}] [{typ}] {body[:60]}"
-             for ts, slug, typ, _, body in ordered[:limit]]
-    if len(ordered) > limit:
-        lines.append(f"  ... and {len(ordered) - limit} more")
+             for ts, slug, typ, _, body in shown]
+    if len(shown) < len(ordered):
+        lines.append(f"  ... and {len(ordered) - len(shown)} more")
     return "\n".join(lines)
 
 
@@ -770,7 +775,8 @@ def cmd_import(args):
                  "work_log.md, then import again.")
     if len(entries) < n:
         conn.close()
-        sys.exit(f"error: {md} holds {len(entries)} entries but {db_path()} already "
+        sys.exit(f"error: {md} holds {len(entries)} "
+                 f"entr{'y' if len(entries) == 1 else 'ies'} but {db_path()} already "
                  f"holds {n}; importing would delete the difference. `wl render` writes "
                  "the export from the database if the database is the copy to keep.")
     # With --force this is the last way left to lose an entry by following the tool's own
@@ -783,8 +789,13 @@ def cmd_import(args):
         map(_roundtrip_key, entries))
     if dropped:
         gone = sum(dropped.values())
+        # Uncapped, unlike the guard's listing and export_md's, and not to be tidied back
+        # into line with them: those two name entries that are merely at stake, and the
+        # command then refuses, so the file they describe is still on disk to be read.
+        # These rows are deleted and not replaced, so this listing is the recovery. A cap
+        # here would leave the tool claiming a recovery by eye that it did not give.
         print(f"dropping {gone} entr{'y' if gone == 1 else 'ies'} {md} cannot account "
-              f"for:\n{_entry_listing(dropped.elements())}")
+              f"for:\n{_entry_listing(dropped.elements(), limit=None)}")
     imported = _import_into(conn, entries)
     conn.close()
     print(f"imported {md} -> {db_path()} ({imported} entries)")
