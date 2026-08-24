@@ -84,6 +84,15 @@ def _sample_entries():
     ]
 
 
+def test_header_does_not_promise_hand_editing():
+    # Casefolded: the header text uses "Hand-edits" (capital H), so a bare
+    # "hand-edit" substring check never matches and the assertion passes
+    # vacuously no matter what the header says.
+    text = wl.HEADER_BLOCK.casefold()
+    assert "hand-edit" not in text or "ignored" in text
+    assert "wl edit" in wl.HEADER_BLOCK
+
+
 def test_render_ordering():
     out = wl.render_markdown(_sample_entries(), ["general"])
     # newest day first
@@ -562,8 +571,9 @@ def test_add_rejects_parens_in_refs():
 def test_export_refuses_a_render_it_cannot_read_back():
     """The backstop: whatever slips past the input checks must not reach the file.
 
-    work_log.md is the source of record and every command re-imports it when it is
-    newer, so an entry the parser cannot read back is permanent, silent loss.
+    The database is the source of record, but work_log.md is what `wl import` rebuilds
+    it from if it is ever lost, so an entry the parser cannot read back would make that
+    rescue copy silently incomplete.
     """
     with worklog_root() as d:
         wl.cmd_add(_NS(slug="general", type="note", ref="",
@@ -613,6 +623,35 @@ def test_export_refuses_to_empty_an_existing_log():
         wl.export_md(conn, allow_empty=True)
         assert "only entry" not in md.read_text()
         conn.close()
+
+
+def test_export_is_flushed_to_disk():
+    """os.replace is atomic for visibility, not durable. The export is the rescue copy
+    of a database that is now the only record, so it must be fsynced before the
+    replace, not just written and left for the OS to flush on its own schedule.
+    """
+    with worklog_root():
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:00", body="x"))
+        calls = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def fake_fsync(fd):
+            calls.append("fsync")
+            return real_fsync(fd)
+
+        def fake_replace(*a, **kw):
+            calls.append("replace")
+            return real_replace(*a, **kw)
+
+        os.fsync, os.replace = fake_fsync, fake_replace
+        try:
+            conn = wl.connect()
+            wl.export_md(conn)
+            conn.close()
+        finally:
+            os.fsync, os.replace = real_fsync, real_replace
+        assert calls == ["fsync", "replace"], calls
 
 
 def test_rm_removes_one_entry_and_updates_the_export():
@@ -789,6 +828,38 @@ def test_legacy_log_warning():
             with redirect_stderr(buf):
                 wl.warn_if_legacy_log_ignored(legacy_root=pathlib.Path(d))
             assert buf.getvalue() == ""
+        finally:
+            os.environ.pop("XDG_DATA_HOME", None)
+            os.environ["WORKLOG_ROOT"] = d
+
+
+def test_legacy_warning_repeats_until_the_new_log_has_entries():
+    """The warning must survive an ordinary command being run in between two checks.
+
+    warn_if_legacy_log_ignored used to key off db_path().exists(). But connect()
+    creates that file via ensure_root() on any command, including a read, so the
+    first command a user ever runs (even `wl report`) silences the warning for good
+    while the legacy log sits untouched. It must key on the new log holding no
+    entries, which keeps warning until the user actually acts on it.
+    """
+    with worklog_root() as d, tempfile.TemporaryDirectory() as xdg:
+        del os.environ["WORKLOG_ROOT"]
+        os.environ["XDG_DATA_HOME"] = xdg
+        try:
+            legacy = pathlib.Path(d, "work_log.db")
+            legacy.write_bytes(b"")
+
+            def warned():
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    wl.warn_if_legacy_log_ignored(legacy_root=pathlib.Path(d))
+                return "WORKLOG_ROOT=" in buf.getvalue()
+
+            assert warned()
+            # Simulate an ordinary command: it opens (and thereby creates) the new,
+            # still-empty database, the way `wl report` would on a first run.
+            wl.connect().close()
+            assert warned()
         finally:
             os.environ.pop("XDG_DATA_HOME", None)
             os.environ["WORKLOG_ROOT"] = d

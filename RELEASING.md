@@ -72,5 +72,9 @@ changes the diff happens after a review is requested.
   `ci.yml` pins the ruff version. If a finding shows up locally that CI does not see, or
   the reverse, that pinning has drifted and the gate means nothing.
 - **A release can move the renderer, and `work_log.md` lives outside the repo** with no
-  version history of its own. Before tagging any change to `parse_markdown` or the
-  `render_*` functions, re-render and re-import a real log and check the entry count.
+  version history of its own. The export is derived now, not the source of record, so
+  do not verify against the live log: that would mean running the rescue path
+  (`wl import --force`) against the one database that matters. Before tagging any
+  change to `parse_markdown` or the `render_*` functions, run `wl render` then
+  `wl import --force` into a scratch `WORKLOG_ROOT`, and compare the entry count
+  before and after.

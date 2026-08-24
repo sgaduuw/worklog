@@ -2,11 +2,12 @@
 
 ![CI](https://github.com/sgaduuw/worklog/actions/workflows/ci.yml/badge.svg)
 
-A tiny SQLite-backed work log. You append entries with `wl add`; `work_log.md`
-is a generated, human-readable export (newest day first). The markdown is the
-source of record, the `.db` is a rebuildable cache: if `work_log.md` changes
-(hand-edit, another session, git pull), the next `wl` command re-imports it
-automatically.
+A tiny SQLite-backed work log. `work_log.db` is the source of record; `work_log.md`
+is a generated, human-readable export of it (newest day first), rewritten on every
+`wl add`, `wl edit` and `wl rm`. It is never read back automatically: change an
+entry with `wl edit`, remove one with `wl rm` (see [Fixing or deleting an
+entry](#fixing-or-deleting-an-entry) below). `wl import` exists only to rebuild the
+database from the export, and only when you ask for it.
 
 No dependencies beyond the Python 3 standard library. Linting uses ruff, which is a
 lint-time tool rather than a runtime one.
@@ -14,14 +15,25 @@ lint-time tool rather than a runtime one.
 ## Install
 
 Drop the folder anywhere and run `./wl`. `wl` is a thin entry point that imports
-`worklog.py` next to it, so keep the two co-located.
+`worklog.py` next to it, so keep the two co-located. See [Where your log
+lives](#where-your-log-lives) below for where the log files end up and how to point
+them elsewhere.
 
-By default the log files live in the **parent** directory of the tool
-(`../work_log.md`, `../work_log.db`). Point them elsewhere with `WORKLOG_ROOT`:
+## Where your log lives
+
+By default `wl` stores the log under the XDG data directory:
+`$XDG_DATA_HOME/worklog` if `XDG_DATA_HOME` is set, otherwise `~/.local/share/worklog`.
+Point it elsewhere with `WORKLOG_ROOT`:
 
 ```sh
 export WORKLOG_ROOT="$HOME/notes"
 ```
+
+`wl` guarantees a correct write to `work_log.db`, not a surviving one: it does not
+back the database up, sync it anywhere, or check that the directory is safe. Storage
+is your concern, not the tool's. The practical answer is to make `WORKLOG_ROOT` a
+directory under version control and commit `work_log.db` (and the generated
+`work_log.md`) like anything else you cannot afford to lose.
 
 ## Usage
 
@@ -53,9 +65,15 @@ export WORKLOG_ROOT="$HOME/notes"
 ./wl stats --since 2026-07-01 --top 3
 ./wl stats --slug backend --when
 
-# regenerate work_log.md from the DB, or rebuild the DB from the markdown
+# fix or delete an entry by id (ids are the first column of `wl log`)
+./wl edit 42 --body "opened the PR, not just drafted it"
+./wl edit 42 --slug backend --type pr --ref PROJ-12
+./wl rm 42
+
+# regenerate work_log.md from the DB, or rebuild the DB from the markdown (rescue path)
 ./wl render
 ./wl import
+./wl import --force   # allow rebuilding over a database that already holds entries
 
 # manage project slugs (see below)
 ./wl slug ls
@@ -99,18 +117,29 @@ re-register the slugs you want.
 
 ## Fixing or deleting an entry
 
-There is no `wl edit`/`wl rm` command, and it doesn't need one: `work_log.md` is
-the editable source of record. Open it in your editor, fix or delete the line, and
-save. The next `wl` command re-imports the markdown (it re-imports whenever the
-file is newer than the DB), so your change is picked up automatically. To force it
-immediately, run `wl import`.
+Change a field with `wl edit`, using the id shown by `wl log`:
 
-Because the markdown is the source of record, anything written to it that the parser
-cannot read back would be lost on that re-import, silently. So `wl` renders the file,
-parses it back, and compares before replacing anything: if an entry would not survive,
-it refuses to write and names the entry. Note the guard runs on write, not on import,
-so a hand-edit that breaks a line is still dropped when the file is read back. Keep
-entry lines in the shape `- HH:MM [type] body (refs: ...)`.
+```sh
+./wl log -n 5                                    # ids are the first column
+./wl edit 42 --body "opened the PR, not just drafted it"
+```
+
+Pass any of `--slug`, `--type`, `--ref`, `--at`, `--body`; only the fields you pass
+change, and the same validation as `wl add` applies, so an edit cannot write what
+`add` would have refused. Remove an entry with `wl rm`, which prints it in full
+first, so a mistake is recoverable by eye:
+
+```sh
+./wl rm 42
+```
+
+`work_log.md` is not a repair path: hand-editing it does nothing, because the export
+is rewritten from the database on every `wl add`, `wl edit`, `wl rm` and `wl render`,
+overwriting any change made only in the file. `wl import` exists to rebuild
+`work_log.db` from `work_log.md`; it is a rescue tool for a lost or corrupted
+database, not part of the normal loop. It refuses to run against a database that
+already holds entries unless you pass `--force`, refuses before deleting anything if
+a line in the file cannot be parsed, and reports every line it could not read.
 
 ## Searching
 
