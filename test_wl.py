@@ -160,13 +160,19 @@ def test_the_database_is_authoritative():
 
 
 def test_import_is_gated_and_loud():
+    """An unreadable line refuses the whole import, empty database or not.
+
+    A partial import used to be committed on an empty database and the reader told to
+    fix the file and import again, which stopped being true at the next `wl add`: that
+    rewrites the export from the partial database and deletes the unreadable line for
+    good, exit 0, silently.
+    """
     with worklog_root() as d:
         md = pathlib.Path(d, "work_log.md")
         md.write_text("# Work Log\n\n## 2026-07-01\n\n### general\n"
                       "- 09:00 [note] good line (refs: none)\n"
                       "- 09:01 [note oops unparseable\n"
                       "- not even a timestamp\n")
-        # An empty database imports, and says what it could not read.
         buf, err = io.StringIO(), io.StringIO()
         try:
             with redirect_stdout(buf), redirect_stderr(err):
@@ -174,11 +180,17 @@ def test_import_is_gated_and_loud():
             raise AssertionError("expected a non-zero exit when lines were dropped")
         except SystemExit as ex:
             assert ex.code not in (0, None), ex.code
-        assert "(1 entries)" in buf.getvalue(), buf.getvalue()
         # Line 6 is the good entry; 7 and 8 are the two that must be reported.
         assert "line 7" in err.getvalue(), err.getvalue()
         assert "line 8" in err.getvalue(), err.getvalue()
+        # And nothing was written, so the file stays the only copy and stays fixable.
+        conn = wl.connect()
+        assert wl._all_entries(conn) == [], wl._all_entries(conn)
+        conn.close()
         # A non-empty database is not clobbered without --force.
+        with redirect_stdout(io.StringIO()):
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:00", body="in the database"))
         try:
             wl.cmd_import(_NS(force=False))
             raise AssertionError("expected SystemExit on a non-empty database")
@@ -208,6 +220,14 @@ def test_add_body_sanitized():
         text = pathlib.Path(d, "work_log.md").read_text()
         # flattened to one line and stripped of surrounding whitespace
         assert "- 09:00 [note] line one line two (refs: none)" in text
+        # str.splitlines() breaks on \r, \v, \f and \x1c-\x1e too, so replacing only
+        # \n let one of those into the database, where it fails the round-trip guard
+        # forever: every later `wl add` exits 1 naming the poisoned entry, and the
+        # export stops tracking the database.
+        wl.cmd_add(_NS(slug="general", type="note", ref="",
+                       at="2026-07-01T09:01", body="carriage\rreturn\vand\ffriends"))
+        text = pathlib.Path(d, "work_log.md").read_text()
+        assert "- 09:01 [note] carriage return and friends (refs: none)" in text
 
 
 def test_log_filters():
@@ -598,19 +618,32 @@ def test_export_refuses_a_render_it_cannot_read_back():
         assert md.read_text() == before
 
 
-def test_export_refuses_to_empty_an_existing_log():
-    """An empty database must not overwrite an export that still holds entries.
+def test_export_refuses_to_shrink_an_existing_log():
+    """A database holding fewer entries than the export must not overwrite it.
 
-    connect() never re-imports now, so an empty root.mv'd-in-a-populated-work_log.md, or
-    a database wiped by hand, would otherwise have the very next `wl add`/`wl render`
-    replace the file with a bare header, silently, with nothing left to recover from.
+    The count is what matters, not emptiness. A root that has work_log.md but no
+    work_log.db is the common case now that the default root is XDG (a fresh machine, a
+    checkout carrying only the markdown), and the very next `wl add` used to rewrite a
+    five-entry file with the one entry it had just inserted, exit 0, and say nothing.
     """
     with worklog_root() as d:
-        wl.cmd_add(_NS(slug="general", type="note", ref="",
-                       at="2026-07-01T09:00", body="only entry"))
         md = pathlib.Path(d, "work_log.md")
+        md.write_text(f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n"
+                      + "".join(f"- 09:0{i} [note] entry {i} (refs: none)\n"
+                                for i in range(5)))
         before = md.read_text()
+        try:
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-02T09:00", body="the sixth"))
+            raise AssertionError("expected SystemExit: the file holds more than the DB")
+        except SystemExit as ex:
+            assert "wl import" in str(ex.code), ex.code
+        assert md.read_text() == before
         conn = wl.connect()
+        # The new row is safe: the database is the record, and it is the export that
+        # was refused.
+        assert len(wl._all_entries(conn)) == 1, wl._all_entries(conn)
+        # An empty database is the same failure one step further along.
         conn.execute("DELETE FROM entries")
         conn.commit()
         try:
@@ -619,9 +652,9 @@ def test_export_refuses_to_empty_an_existing_log():
         except SystemExit as ex:
             assert "wl import" in str(ex.code), ex.code
         assert md.read_text() == before
-        # The one legitimate way to empty the log (Task 4's `wl rm`) opts in explicitly.
-        wl.export_md(conn, allow_empty=True)
-        assert "only entry" not in md.read_text()
+        # The one legitimate way to shrink the log (`wl rm`) opts in explicitly.
+        wl.export_md(conn, allow_shrink=True)
+        assert "entry 1" not in md.read_text()
         conn.close()
 
 
@@ -706,6 +739,11 @@ def test_edit_changes_one_field_at_a_time():
 
         assert "after" in edit(body="after")
         assert "decision" in edit(type="decision")
+        # `edit` sanitises a body exactly as `add` does, including the whitespace
+        # classes str.splitlines() breaks on beyond \n.
+        edit(body="carriage\rreturn")
+        assert "[decision] carriage return (refs" in pathlib.Path(d, "work_log.md").read_text()
+        edit(body="after")
         text = pathlib.Path(d, "work_log.md").read_text()
         assert "after" in text and "before" not in text and "[decision]" in text
         # Untouched fields keep their values.
@@ -730,6 +768,25 @@ def test_edit_changes_one_field_at_a_time():
             raise AssertionError("expected SystemExit for an unknown id")
         except SystemExit as ex:
             assert "999" in str(ex.code), ex.code
+
+
+def test_edit_unknown_slug_warns_but_edits():
+    """`edit` shares add's typo guard, not just its validators.
+
+    The warning exists because `--slug typoo` is accepted by every check `add` makes;
+    an edit that could not warn was a silent way to file an entry under a bucket
+    nothing else uses.
+    """
+    with worklog_root() as d:
+        with redirect_stdout(io.StringIO()):
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:00", body="filed"))
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            wl.cmd_edit(_NS(id=1, slug="mystery", type=None, ref=None,
+                            at=None, body=None))
+        assert "unknown slug" in err.getvalue(), err.getvalue()
+        assert "### mystery" in pathlib.Path(d, "work_log.md").read_text()
 
 
 def test_import_force_scans_before_it_deletes():
@@ -763,6 +820,39 @@ def test_import_force_scans_before_it_deletes():
         conn = wl.connect()
         rows = wl._all_entries(conn)
         assert len(rows) == 1 and rows[0].body == "fresh", rows
+        conn.close()
+
+
+def test_import_refuses_to_shrink_the_database():
+    """The rescue path must never be the thing that erases the log.
+
+    `wl import --force` against a missing (or truncated, or header-only) work_log.md ran
+    DELETE FROM entries, inserted nothing, committed, and printed "(0 entries)" with exit
+    0. The scan-before-delete gate did not catch it, because a file holding no entries
+    also holds no lines that fail to parse. `--force` does not mean "empty my log".
+    """
+    with worklog_root() as d:
+        for body in ("one", "two", "three"):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at="2026-07-01T09:00", body=body))
+        md = pathlib.Path(d, "work_log.md")
+        md.unlink()
+        try:
+            wl.cmd_import(_NS(force=True))
+            raise AssertionError("expected SystemExit: there is no file to import")
+        except SystemExit as ex:
+            assert "does not exist" in str(ex.code), ex.code
+        # A header-only file parses to zero entries, which is not a reason to empty a
+        # database holding three.
+        md.write_text(f"{wl.HEADER_BLOCK}\n")
+        try:
+            wl.cmd_import(_NS(force=True))
+            raise AssertionError("expected SystemExit: the file holds fewer entries")
+        except SystemExit as ex:
+            assert "3" in str(ex.code), ex.code
+        conn = wl.connect()
+        assert len(wl._all_entries(conn)) == 3, wl._all_entries(conn)
         conn.close()
 
 

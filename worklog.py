@@ -80,6 +80,18 @@ def check_refs(refs):
         sys.exit(f"error: refs {refs!r} may not contain parentheses")
 
 
+def flatten_body(body):
+    """Collapse every run of whitespace to one space, and strip the ends.
+
+    str.split() splits on every whitespace class, which matters because str.splitlines()
+    does too: replacing only "\\n" let a "\\r", "\\v", "\\f" or "\\x1c" through into the
+    database, where it rendered an export that parses one line short. The round-trip
+    guard then refused every later export, so the file silently stopped tracking the
+    database while each `wl add` exited 1 and committed its row anyway.
+    """
+    return " ".join(body.split())
+
+
 def fmt_refs(refs):
     """Stored 'PROJ-1,PROJ-2' -> display 'PROJ-1, PROJ-2'; '' -> 'none'."""
     return refs.replace(",", ", ") if refs else "none"
@@ -283,20 +295,22 @@ def db_path():
     return root() / "work_log.db"
 
 
-def _import_into(conn):
-    """Rebuild the entries table from the export. Returns (imported, skipped).
+def _import_into(conn, entries):
+    """Replace the entries table with `entries`. Returns how many were written.
 
     This is the rescue path, not part of the normal loop: the database is the source of
     record and the markdown is derived from it. It stays because the export is the only
     human-readable copy, so it is what a lost database is rebuilt from.
+
+    The caller parses the file and does the refusing, so the rows cmd_import's gates
+    were run against are exactly the rows written here: re-reading would leave a window
+    in which the file shrinks between the check and the DELETE.
     """
     conn.execute("DELETE FROM entries")
-    md = md_path()
-    entries, skipped = scan_markdown(md.read_text()) if md.exists() else ([], [])
     conn.executemany("INSERT INTO entries(ts,slug,type,refs,body) VALUES(?,?,?,?,?)",
                      [(e.ts, e.slug, e.type, e.refs, e.body) for e in entries])
     conn.commit()
-    return len(entries), skipped
+    return len(entries)
 
 
 def connect():
@@ -333,7 +347,32 @@ def _roundtrip_key(e):
     return (e.ts[:16], e.slug, e.type, e.refs, e.body)
 
 
-def export_md(conn, allow_empty=False):
+# The invariant both copies are guarded by, in the two directions data moves:
+#
+#     No command reduces the entry count of either copy without an explicit opt-in.
+#
+# export_md carries it from the database to the export, cmd_import from the export to
+# the database. Both used to compare against what the parser could read rather than
+# against how much the other copy holds, which is how an empty database could shrink a
+# populated file, and a missing file could empty a populated database, both reporting
+# success. `wl rm` is the only opt-in: it is the one legitimate way to shrink the log.
+def _count_exported_entries(path, over):
+    """Entries in the export on disk, or 0 unless it holds more than `over` of them.
+
+    The count answers one question, "would this write shrink the file?", so it is
+    allowed to stop early on a no. An export holds at most one entry per line starting
+    with "- ", and that cheap count settles the ordinary path (a database that has just
+    gained the row it is about to export) without parsing a file of thousands of lines.
+    """
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if text.count("\n- ") <= over:
+        return 0
+    return len(scan_markdown(text)[0])
+
+
+def export_md(conn, allow_shrink=False):
     """Render every entry and atomically replace work_log.md, if it reads back intact.
 
     The export is derived, so a refused write costs a stale file rather than data. It is
@@ -341,20 +380,20 @@ def export_md(conn, allow_empty=False):
     is rebuilt from: an export that cannot be read back is an export that cannot rescue
     anything.
 
-    Refuses to replace a populated file with an empty one unless allow_empty=True: an
-    empty database is far more often a missing `work_log.db` (a fresh root, a wiped file)
-    than a genuinely empty log, and connect() no longer re-imports to recover from that.
-    The one legitimate way to reach a real zero, deleting the last entry, opts in.
+    Refuses to replace the file with one holding fewer entries unless allow_shrink=True.
+    A database that trails its own export is far more often a missing `work_log.db` (a
+    fresh XDG root, a checkout carrying only the markdown, a wiped file) than a real
+    deletion, and connect() no longer re-imports to recover from that.
     """
     entries = _all_entries(conn)
     target = md_path()
-    # The guard below can only fire when the database is empty, so skip the read and
-    # parse of a (possibly large) existing export on every ordinary `wl add`.
-    if not entries and not allow_empty and target.exists() and scan_markdown(target.read_text())[0]:
-        sys.exit(f"error: {target} holds entries but the database is empty; refusing to "
-                 "overwrite it and lose them. If the database is genuinely empty this "
-                 "run is safe to repeat with allow_empty; otherwise `wl import` rebuilds "
-                 "it from this file.")
+    exported = 0 if allow_shrink else _count_exported_entries(target, over=len(entries))
+    if exported > len(entries):
+        sys.exit(f"error: {target} holds {exported} entries but the database holds "
+                 f"{len(entries)}; refusing to overwrite it and lose the difference. "
+                 "Rebuild the database from the file with `wl import` (add --force once "
+                 f"the database holds entries), or delete {target} and run `wl render` "
+                 "if the database is the copy to keep.")
     text = render_markdown(entries, known_slugs(conn))
     survived = set(map(_roundtrip_key, parse_markdown(text)))
     lost = sorted(k for k in map(_roundtrip_key, entries) if k not in survived)
@@ -383,7 +422,7 @@ def cmd_add(args):
     check_slug(args.slug)
     refs = normalize_refs(args.ref)
     check_refs(refs)
-    body = args.body.replace("\n", " ").strip()
+    body = flatten_body(args.body)
     conn = connect()
     if args.slug not in known_slugs(conn):
         print(f"warning: unknown slug {args.slug!r} "
@@ -399,7 +438,7 @@ def cmd_add(args):
 
 
 def cmd_rm(args):
-    """Delete one entry by id, printing it in full first.
+    """Delete one entry by id, printing it in full.
 
     No confirmation prompt: prompts break non-interactive callers, which is most of
     them here. Printing the entry is what makes a mistake recoverable, by eye.
@@ -413,10 +452,9 @@ def cmd_rm(args):
     e = Entry(*row)
     conn.execute("DELETE FROM entries WHERE id = ?", (args.id,))
     conn.commit()
-    # allow_empty=True: `wl rm` is the one legitimate way to empty the log, by
-    # removing the last remaining entry, and export_md's data-loss guard (Task 3)
-    # would otherwise refuse to write an empty export over a populated file.
-    export_md(conn, allow_empty=True)
+    # allow_shrink=True: `wl rm` is the one legitimate way to make the log smaller, so
+    # it is the one caller that opts out of the guard above export_md.
+    export_md(conn, allow_shrink=True)
     conn.close()
     print(f"removed {e.id}: {e.ts[:16]} [{e.slug}] [{e.type}] {e.body} "
           f"(refs: {fmt_refs(e.refs)})")
@@ -446,7 +484,7 @@ def cmd_edit(args):
         except ValueError as e:
             sys.exit(f"error: {e}")
     if args.body is not None:
-        fields["body"] = args.body.replace("\n", " ").strip()
+        fields["body"] = flatten_body(args.body)
     if not fields:
         sys.exit("error: nothing to change; pass at least one of "
                  "--slug, --type, --ref, --at, --body")
@@ -454,6 +492,11 @@ def cmd_edit(args):
     if not conn.execute("SELECT 1 FROM entries WHERE id = ?", (args.id,)).fetchone():
         conn.close()
         sys.exit(f"error: no entry with id {args.id}")
+    # The same typo guard `add` fires: every check above passes a slug like 'typoo',
+    # and an edit that could not warn was the silent way to file one.
+    if "slug" in fields and fields["slug"] not in known_slugs(conn):
+        print(f"warning: unknown slug {args.slug!r} "
+              f"(register it with `wl slug add {args.slug}`?)", file=sys.stderr)
     # Safe to interpolate: fields' keys are only ever the literal strings assigned
     # above (slug/type/refs/ts/body), never user input, and the values stay bound.
     assignments = ", ".join(f"{k} = ?" for k in fields)
@@ -607,6 +650,12 @@ def cmd_render(args):
 
 
 def cmd_import(args):
+    """Rebuild the database from the export. Every refusal comes before the delete.
+
+    The invariant above export_md, in this direction: an import that would leave the
+    database holding fewer entries than it already has is refused, whatever --force
+    says. --force means "the file is the copy to keep", not "empty my log".
+    """
     conn = connect()
     n = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
     if n and not args.force:
@@ -614,25 +663,31 @@ def cmd_import(args):
         sys.exit(f"error: {db_path()} already holds {n} entries and is the source of "
                  "record. `wl import` rebuilds it from work_log.md and is a rescue "
                  "path, not a sync. Pass --force if that is what you want.")
-    if n:
-        # --force on a non-empty database: scan before anything is deleted. A skipped
-        # line here is an entry only the DB holds, and the rebuild below would not
-        # restore it no matter what the file is fixed to say afterwards.
-        md = md_path()
-        _, skipped = scan_markdown(md.read_text()) if md.exists() else ([], [])
-        if skipped:
-            conn.close()
-            sys.exit(f"error: work_log.md has {len(skipped)} line(s) that do not parse; "
-                     f"--force would delete the {n} entries already in {db_path()} to "
-                     "rebuild from an incomplete read. Fix work_log.md, then import again.")
-    imported, skipped = _import_into(conn)
-    conn.close()
-    print(f"imported {md_path()} -> {db_path()} ({imported} entries)")
+    md = md_path()
+    if not md.exists():
+        conn.close()
+        sys.exit(f"error: {md} does not exist, so there is nothing to import. "
+                 f"{db_path()} is untouched; `wl render` writes the export from it.")
+    entries, skipped = scan_markdown(md.read_text())
+    # Refused even on an empty database, where a partial import used to be committed
+    # with "fix them and import again". That stopped being true at the next `wl add`:
+    # it rewrites the export from the partial database and deletes the unreadable line.
     if skipped:
         for lineno, line in skipped:
             print(f"warning: line {lineno} not read: {line[:90]}", file=sys.stderr)
-        sys.exit(f"error: {len(skipped)} line(s) looked like entries and were not "
-                 "imported. Fix them in work_log.md and import again.")
+        conn.close()
+        sys.exit(f"error: {md} has {len(skipped)} line(s) that look like entries and do "
+                 "not parse. An import deletes the entries table and rebuilds it from "
+                 "this file, so those lines would be lost from both copies. Fix them in "
+                 "work_log.md, then import again.")
+    if len(entries) < n:
+        conn.close()
+        sys.exit(f"error: {md} holds {len(entries)} entries but {db_path()} already "
+                 f"holds {n}; importing would delete the difference. `wl render` writes "
+                 "the export from the database if the database is the copy to keep.")
+    imported = _import_into(conn, entries)
+    conn.close()
+    print(f"imported {md} -> {db_path()} ({imported} entries)")
 
 
 def cmd_slug(args):
