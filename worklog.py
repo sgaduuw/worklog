@@ -347,32 +347,37 @@ def _roundtrip_key(e):
     return (e.ts[:16], e.slug, e.type, e.refs, e.body)
 
 
+def _entry_listing(keys):
+    """Round-trip keys as one indented line each: how every refusal names what is at stake.
+
+    Sorted here rather than by the caller, so a refusal reads the same whichever set of
+    keys produced it, and so a Counter's elements() can be handed over as-is.
+    """
+    return "\n".join(f"  {ts} [{slug}] [{typ}] {body[:60]}"
+                     for ts, slug, typ, _, body in sorted(keys))
+
+
 # The invariant both copies are guarded by, in the two directions data moves:
 #
 #     No command overwrites the export while the export holds entries the database
 #     does not.
 #
 # check_export_not_ahead carries it from the database to the export, cmd_import from the
-# export to the database. Both used to compare against what the parser could read rather
-# than against how much the other copy holds, which is how an empty database could shrink
-# a populated file, and a missing file could empty a populated database, both reporting
-# success.
+# export to the database.
 #
-# The comparison then has to run before the command writes, so that both counts still
-# describe the same log. Asked from inside export_md it ran after the commit, blind by
-# exactly the rows just written: against a five-entry file and no database, four adds
-# were refused and committed their row anyway, and the fifth equalised the counts,
-# passed the check, and took all five original entries with it.
-def _count_exported_entries(path, over):
-    """Entries in the export on disk, or 0 unless it holds more than `over` of them.
-
-    The count answers one question, "does the file hold entries the database does not?",
-    so it is allowed to stop early on a no. An export holds at most one entry per line
-    starting with "- ", and that cheap count settles the ordinary path (a database that
-    matches its export) without parsing a file of thousands of lines.
-    """
+# It is a question about identities, never about quantities. Counting was cheaper and
+# wrong in both directions: equal counts said nothing about a line rewritten in place,
+# and a file behind on count still destroyed an entry the database had never held.
+#
+# The comparison has to run before the command writes, so that both copies still describe
+# the same log. Asked from inside export_md it ran after the commit, blind by exactly the
+# rows just written: against a five-entry file and no database, four adds were refused and
+# committed their row anyway, and the fifth equalised the counts, passed the check, and
+# took all five original entries with it.
+def _exported_keys(path):
+    """Round-trip keys of every entry in the export on disk. Empty when there is none."""
     if not path.exists():
-        return 0
+        return Counter()
     try:
         text = path.read_text()
     except (OSError, UnicodeDecodeError) as e:
@@ -381,9 +386,7 @@ def _count_exported_entries(path, over):
                  "and an unreadable export is exactly the shape that must not be "
                  "overwritten. Move it aside and run `wl render` if the database is the "
                  "copy to keep, or repair it and run `wl import`.")
-    if text.count("\n- ") <= over:
-        return 0
-    return len(scan_markdown(text)[0])
+    return Counter(map(_roundtrip_key, parse_markdown(text)))
 
 
 def check_export_not_ahead(conn):
@@ -397,16 +400,24 @@ def check_export_not_ahead(conn):
     fresh XDG root, a checkout carrying only the markdown, a wiped file) than a real
     deletion, and connect() no longer re-imports to recover from that.
     """
-    n = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
-    md = md_path()
-    exported = _count_exported_entries(md, over=n)
-    if exported > n:
-        plural = "y" if exported == 1 else "ies"
-        sys.exit(f"error: {md} holds {exported} entr{plural} but {db_path()} holds {n}; "
-                 "refusing to overwrite the export and lose the difference. Nothing was "
-                 "written. Rebuild the database from the export with `wl import` (which "
-                 f"needs --force once the database holds entries), or delete {md} and "
-                 "run `wl render` if the database is genuinely the copy to keep.")
+    # The file first, the database second: a parallel session committing between the two
+    # reads can only make `current` larger, which is the permissive direction, and those
+    # rows are really committed. Reading the database first biases the other way, and
+    # spuriously refuses the concurrent add's own re-render.
+    exported = _exported_keys(md_path())
+    current = Counter(map(_roundtrip_key, _all_entries(conn)))
+    # A multiset difference, so two byte-identical entries stay two entries: a set would
+    # call an export holding the line twice equal to a database holding it once.
+    orphans = exported - current
+    if orphans:
+        n = sum(orphans.values())
+        plural = "y" if n == 1 else "ies"
+        sys.exit(f"error: {md_path()} holds {n} entr{plural} that {db_path()} does not. "
+                 "Nothing was written; overwriting the export would lose:\n"
+                 f"{_entry_listing(orphans.elements())}\n"
+                 "Rebuild the database from the export with `wl import` (which needs "
+                 "--force once the database holds entries) to keep the difference, or "
+                 f"delete {md_path()} and run `wl render` to discard it.")
 
 
 def export_md(conn):
@@ -425,12 +436,11 @@ def export_md(conn):
     target = md_path()
     text = render_markdown(entries, known_slugs(conn))
     survived = set(map(_roundtrip_key, parse_markdown(text)))
-    lost = sorted(k for k in map(_roundtrip_key, entries) if k not in survived)
+    lost = [k for k in map(_roundtrip_key, entries) if k not in survived]
     if lost:
-        listing = "\n".join(f"  {ts} [{slug}] [{typ}] {body[:60]}"
-                            for ts, slug, typ, _, body in lost)
         sys.exit(f"error: work_log.md not replaced; {len(lost)} entr"
-                 f"{'y' if len(lost) == 1 else 'ies'} would not survive `wl import`:\n{listing}\n"
+                 f"{'y' if len(lost) == 1 else 'ies'} would not survive `wl import`:\n"
+                 f"{_entry_listing(lost)}\n"
                  "The entry is safe in the database; work_log.md was left as it was. "
                  "Fix it with `wl edit`, then `wl render`.")
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")

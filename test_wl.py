@@ -153,7 +153,18 @@ def test_the_database_is_authoritative():
         out = buf.getvalue()
         assert "from the database" in out
         assert "from the markdown" not in out
-        # And a render overwrites the mangled file rather than absorbing it.
+        # A render never absorbs the file, whatever the mtimes say, but it does not
+        # silently overwrite it either: the mangled line is an entry the database has
+        # never held, and the counts tie at one, which is what used to let it through.
+        try:
+            wl.cmd_render(_NS())
+            raise AssertionError("expected SystemExit: the export holds an entry the DB lacks")
+        except SystemExit as ex:
+            assert "from the markdown" in str(ex.code), ex.code
+        assert "from the markdown" in md.read_text()
+        # Discarding it is the user's decision, and once taken the render is from the
+        # database alone.
+        md.unlink()
         wl.cmd_render(_NS())
         assert "from the database" in md.read_text()
         assert "from the markdown" not in md.read_text()
@@ -719,6 +730,112 @@ def test_adds_cannot_equalise_their_way_past_the_export_guard():
         conn = wl.connect()
         assert wl._all_entries(conn) == [], wl._all_entries(conn)
         conn.close()
+
+
+def test_a_hand_edit_at_equal_count_is_refused():
+    """A line rewritten in place changes no count, and must still not be overwritten.
+
+    Three entries on each side, so a count comparison sees two copies that agree and
+    replaces the edited line with the row it was edited away from. Exit 0, nothing said,
+    and the only copy of that wording is gone.
+    """
+    with worklog_root() as d:
+        for i in range(3):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at=f"2026-07-01T09:0{i}", body=f"entry {i}"))
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text(md.read_text().replace("entry 1", "REWRITTEN BY HAND"))
+        before = md.read_text()
+        assert before.count("\n- ") == 3, before      # equal to the database, not ahead
+        raised = False
+        try:
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at="2026-07-02T09:00", body="the newcomer"))
+        except SystemExit as ex:
+            raised = True
+            # The refusal names the entry at stake, not a quantity: a count is what the
+            # reader cannot act on when deciding which copy to keep.
+            assert "REWRITTEN BY HAND" in str(ex.code), ex.code
+            assert "wl import" in str(ex.code), ex.code
+        if not raised:
+            raise AssertionError("the add overwrote a hand-edited line at equal count")
+        assert md.read_text() == before, md.read_text()
+        conn = wl.connect()
+        assert len(wl._all_entries(conn)) == 3, wl._all_entries(conn)
+        conn.close()
+
+
+def test_an_export_behind_on_count_can_still_hold_an_orphan():
+    """Four rows, three exported lines, one of them the database has never held.
+
+    Three is not more than four, so a count comparison passes and the render deletes the
+    orphan from the only copy that had it. How many entries each side holds says nothing
+    about whether they are the same entries.
+    """
+    with worklog_root() as d:
+        for i in range(4):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at=f"2026-07-01T09:0{i}", body=f"entry {i}"))
+        md = pathlib.Path(d, "work_log.md")
+        kept = "\n".join(ln for ln in md.read_text().splitlines()
+                         if "entry 2" not in ln and "entry 3" not in ln)
+        md.write_text(f"{kept}\n- 09:09 [note] ONLY IN THE FILE (refs: none)\n")
+        before = md.read_text()
+        assert before.count("\n- ") == 3, before      # genuinely behind the database
+        raised = False
+        try:
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at="2026-07-02T09:00", body="the newcomer"))
+        except SystemExit as ex:
+            raised = True
+            assert "ONLY IN THE FILE" in str(ex.code), ex.code
+            # The two entries the file is missing are the database's business, not a
+            # reason to refuse, so they must not be listed as at risk.
+            assert "entry 2" not in str(ex.code), ex.code
+        if not raised:
+            raise AssertionError("the add destroyed an orphan in a file behind on count")
+        assert md.read_text() == before, md.read_text()
+        conn = wl.connect()
+        assert len(wl._all_entries(conn)) == 4, wl._all_entries(conn)
+        conn.close()
+
+
+def test_identical_entries_are_not_collapsed_by_the_guard():
+    """Two byte-identical entries are two entries on both sides of the comparison.
+
+    Comparing sets of identities would collapse them, so an export holding the line
+    twice against a database holding it once would look equal and lose a copy. And a
+    database that legitimately holds both must not be refused against its own export.
+    """
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        for _ in range(2):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at="2026-07-01T09:00", body="the same thing twice"))
+        assert md.read_text().count("the same thing twice") == 2, md.read_text()
+        # A duplicate the database really holds is not a refusal: the next add proceeds.
+        with redirect_stdout(io.StringIO()):
+            wl.cmd_add(_NS(slug="general", type="note", ref="",
+                           at="2026-07-01T09:01", body="a third"))
+        conn = wl.connect()
+        assert len(wl._all_entries(conn)) == 3, wl._all_entries(conn)
+        conn.close()
+        # A third copy of the same line, in the file only. Identical to two the database
+        # does hold, and still an entry it does not.
+        md.write_text(f"{md.read_text()}- 09:00 [note] the same thing twice (refs: none)\n")
+        before = md.read_text()
+        try:
+            wl.cmd_render(_NS())
+            raise AssertionError("expected SystemExit: the third copy is in the file alone")
+        except SystemExit as ex:
+            assert "the same thing twice" in str(ex.code), ex.code
+            assert "holds 1 entry" in str(ex.code), ex.code
+        assert md.read_text() == before, md.read_text()
 
 
 def test_an_unreadable_export_refuses_rather_than_tracebacks():
