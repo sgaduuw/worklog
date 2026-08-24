@@ -88,10 +88,13 @@ directory under version control and commit `work_log.db` (and the generated
   with `wl slug add` (see [Managing slugs](#managing-slugs)). An unregistered slug
   still logs, but warns and sorts after the registered ones.
 - `--type`: one of `ticket`, `pr`, `idea`, `decision`, `blocker`, `note`.
-- `--ref` (optional): comma-separated keys, e.g. `PROJ-12,PROJ-13`. On `wl log` and
-  `wl stats`, `--ref` matches whole keys in this column *and* in the entry body, so a
-  ticket named only in prose is still found. `PROJ-1` never matches `PROJ-10`. No
-  parentheses: they would close the `(refs: ...)` suffix early on re-import.
+- `--ref` (optional): comma-separated Jira issue keys, e.g. `PROJ-12,PROJ-13`. Each
+  one must match `PREFIX-123`: uppercase letters, a hyphen, digits, nothing else; a
+  key in the wrong case or shape is refused rather than rewritten. This only
+  constrains what you may write here, not whether the key exists in Jira. On `wl
+  log` and `wl stats`, `--ref` matches whole keys in this column *and* in the entry
+  body, so a ticket named only in prose is still found. `PROJ-1` never matches
+  `PROJ-10`.
 - `--at` (optional): `HH:MM` (today) or `YYYY-MM-DDTHH:MM` (past day). Defaults to now.
 
 ## Managing slugs
@@ -166,8 +169,8 @@ line that looks like an entry and does not parse, reporting every such line. Row
 
 `wl log` filters by slug, type, ref, and date, prints newest first, and shows the
 newest 20 by default (`-n N`, or `-n 0` for all) with a tail line counting what it
-withheld. A ticket key is found whether it sits in `--ref` or only in the body. For
-any other free-text search, grep the export:
+withheld. A Jira key (the `PREFIX-123` shape `--ref` requires) is found whether it
+sits in `--ref` or only in the body. For any other free-text search, grep the export:
 
 ```sh
 grep -i hugepages work_log.md
@@ -215,8 +218,8 @@ how sprint tooling counts them and where `strftime %W` disagrees around New Year
 
 Bars scale to the largest row in their own block, and any non-zero count gets at least
 one block, so a 1-in-500 row shows up instead of rendering blank. An entry can cite
-several refs, so that block counts mentions rather than entries; `--top N` caps it
-(default 10) and says how many it withheld. Blocks with nothing to show are omitted,
+several Jira keys, so that block counts mentions rather than entries; `--top N` caps
+it (default 10) and says how many it withheld. Blocks with nothing to show are omitted,
 as are weekdays and hours that saw no entries.
 
 ## Health check (optional)

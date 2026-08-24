@@ -601,6 +601,9 @@ def test_add_rejects_a_slug_the_parser_cannot_read_back():
 
 
 def test_add_rejects_parens_in_refs():
+    """A parenthesis fails the Jira-key shape on its own now; check_refs no longer
+    has a parens-specific rule. Kept as regression coverage that this value is still
+    refused, just for a different reason than before."""
     with worklog_root():
         try:
             wl.cmd_add(_NS(slug="general", type="note", ref="FM-1)",
@@ -608,6 +611,51 @@ def test_add_rejects_parens_in_refs():
             raise AssertionError("expected SystemExit")
         except SystemExit as ex:
             assert ex.code not in (0, None), ex.code
+
+
+def test_check_refs_accepts_jira_keys():
+    wl.check_refs("FM-123")
+    wl.check_refs("ITSM-63712")  # long prefix and long number both fine
+    wl.check_refs("")            # empty means "no refs"
+
+
+def test_check_refs_accepts_several_refs():
+    wl.check_refs("FM-1,FM-2")
+    wl.check_refs(",".join(f"FM-{n}" for n in range(1, 10)))  # nine refs, one entry
+
+
+def test_check_refs_rejects_a_carriage_return():
+    """The motivating bug: normalize_refs' .strip() only trims a ref's ends, so a CR
+    buried inside one used to reach the database untouched, then split the exported
+    "(refs: ...)" line in two on the next read. Because the row had already committed,
+    every later `wl add` then refused until someone ran `wl edit` on that one row.
+    """
+    try:
+        wl.check_refs("FM-1\rFM-2")
+        raise AssertionError("expected SystemExit")
+    except SystemExit as ex:
+        assert ex.code not in (0, None), ex.code
+
+
+def test_check_refs_rejects_lowercase():
+    """Refused, not upcased: an identifier is not silently rewritten, and rejecting
+    keeps `wl log --ref` matching case-sensitively without a second rule to stay
+    consistent with a case-folding write path."""
+    try:
+        wl.check_refs("fm-1")
+        raise AssertionError("expected SystemExit")
+    except SystemExit as ex:
+        assert ex.code not in (0, None), ex.code
+
+
+def test_check_refs_rejects_shapes_that_are_not_jira_keys():
+    for bad in ("FM4587", "#41", "ticket"):
+        try:
+            wl.check_refs(bad)
+            raise AssertionError(f"expected SystemExit for {bad!r}")
+        except SystemExit as ex:
+            assert ex.code not in (0, None), ex.code
+            assert bad in str(ex.code), ex.code  # names the offending element
 
 
 def test_export_refuses_a_render_it_cannot_read_back():
@@ -1130,6 +1178,20 @@ def test_edit_changes_one_field_at_a_time():
             raise AssertionError("expected SystemExit for an unknown id")
         except SystemExit as ex:
             assert "999" in str(ex.code), ex.code
+
+
+def test_edit_ref_is_validated_like_add():
+    """`edit` and `add` share check_refs; a shape add would refuse must be refused
+    here too, not just the parens case already covered elsewhere."""
+    with worklog_root():
+        wl.cmd_add(_NS(slug="general", type="note", ref="FM-1",
+                       at="2026-07-01T09:00", body="x"))
+        try:
+            wl.cmd_edit(_NS(id=1, slug=None, type=None, ref="fm-1",
+                            at=None, body=None))
+            raise AssertionError("expected SystemExit")
+        except SystemExit as ex:
+            assert ex.code not in (0, None), ex.code
 
 
 def test_edit_unknown_slug_warns_but_edits():

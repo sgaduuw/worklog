@@ -74,10 +74,32 @@ def check_slug(name):
                  "rebuild the database from work_log.md")
 
 
+_REF_RE = re.compile(r"[A-Z]+-[0-9]+")
+
+
 def check_refs(refs):
-    """Exit on parens in refs: they close the '(refs: ...)' suffix early on re-import."""
-    if set("()") & set(refs):
-        sys.exit(f"error: refs {refs!r} may not contain parentheses")
+    """Exit unless every ref is a Jira issue key: uppercase prefix, hyphen, digits.
+
+    refs is normalize_refs' comma-joined output; split and check each element so a
+    multi-ref entry is judged key by key rather than as one joined string. That is
+    also why this catches what the old parens-only check could not: a stray control
+    character embedded inside one ref (not at its ends, so normalize_refs' .strip()
+    never touches it) used to reach the database, then split the exported
+    "(refs: ...)" line in two on the next read.
+
+    `[0-9]` rather than `\\d`: `\\d` matches Unicode decimal digits, so `FM-٣`
+    would pass a `\\d` check and then name a key no Jira project contains.
+
+    Rejects rather than fixes: upcasing `fm-1` would be exactly the class of silent
+    rewrite this file's history warns about, and it would force `wl log --ref` to
+    match case-insensitively to stay consistent with what got stored.
+    """
+    if not refs:
+        return
+    for ref in refs.split(","):
+        if not _REF_RE.fullmatch(ref):
+            sys.exit(f"error: ref {ref!r} is not a Jira key; want PREFIX-123 "
+                     "(uppercase letters, hyphen, digits), e.g. FM-123")
 
 
 def flatten_body(body):
