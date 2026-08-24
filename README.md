@@ -139,14 +139,18 @@ overwriting any change made only in the file. `wl import` exists to rebuild
 `work_log.db` from `work_log.md`; it is a rescue tool for a lost or corrupted
 database, not part of the normal loop.
 
-No command makes either copy smaller without being told to. `wl import` refuses a
-database that already holds entries unless you pass `--force`, and refuses, before
-deleting anything, a missing `work_log.md`, a file that reads back as fewer entries
-than the database already holds, and a file with a line that looks like an entry and
-does not parse, reporting every such line. In the other direction, an export is
-refused rather than written when the file on disk holds more entries than the
-database, which is what a root holding the markdown but no `work_log.db` looks like.
-`wl rm` is the one command that may shrink the log.
+No command overwrites the export while the export holds entries the database does not.
+The comparison runs before the command writes anything, so a refusal leaves both copies
+untouched and you still get to choose which one to keep. That covers a root holding
+`work_log.md` but no `work_log.db` (a fresh machine, a checkout carrying only the
+markdown), and a file someone typed an extra line into. An export that cannot be read at
+all is refused for the same reason. `wl rm` needs no exception: it is checked before it
+deletes, while both copies still agree.
+
+In the other direction, `wl import` refuses a database that already holds entries unless
+you pass `--force`, and refuses, before deleting anything, a missing `work_log.md`, a
+file that reads back as fewer entries than the database already holds, and a file with a
+line that looks like an entry and does not parse, reporting every such line.
 
 ## Searching
 
@@ -240,9 +244,9 @@ Grouped by milestone; see `git log` for the full commit-level detail, and
     from the export, refuses a database that already holds entries without `--force`,
     and refuses a missing file, a file that reads back as fewer entries than the
     database holds, or a line that looks like an entry and does not parse.
-  - No command makes either copy smaller without being told to: an export that would
-    hold fewer entries than the file already on disk is refused, and `wl rm` is the one
-    command that may shrink the log.
+  - No command overwrites the export while it holds entries the database does not, nor
+    when it cannot be read at all. The check runs before the command writes, so a
+    refusal costs nothing, and `wl rm` needs no exception to it.
   - The schema carries a `PRAGMA user_version` stamp and migrates in place, since the
     database can no longer be rebuilt by deleting it.
   - **Upgrading from 0.4 or earlier:** the default root moved from the directory holding

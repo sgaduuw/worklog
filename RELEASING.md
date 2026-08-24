@@ -79,7 +79,8 @@ changes the diff happens after a review is requested.
 
   ```sh
   D=$(mktemp -d)
-  cp "${WORKLOG_ROOT:-$HOME/.local/share/worklog}/work_log.md" "$D/"
+  # The same resolution order as root() and the healthcheck: WORKLOG_ROOT, then XDG.
+  cp "${WORKLOG_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/worklog}/work_log.md" "$D/"
   WORKLOG_ROOT=$D python3 wl import          # note the entry count
   WORKLOG_ROOT=$D python3 wl render
   WORKLOG_ROOT=$D python3 wl import --force  # must print the same count
@@ -87,5 +88,7 @@ changes the diff happens after a review is requested.
   ```
 
   Both counts must equal the live log's, and neither run may report a dropped line.
-  The `cp` is the whole check: without it the scratch root holds nothing, both counts
-  are zero, and the recipe passes no matter what the renderer does.
+  The `cp` is the whole check: without it the scratch root holds nothing to verify
+  against. That no longer passes silently, since `wl import` exits 1 on a missing
+  `work_log.md`, but an exit 0 still proves nothing until you have compared both
+  counts against the live log by eye.

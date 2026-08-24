@@ -187,10 +187,14 @@ def test_import_is_gated_and_loud():
         conn = wl.connect()
         assert wl._all_entries(conn) == [], wl._all_entries(conn)
         conn.close()
-        # A non-empty database is not clobbered without --force.
-        with redirect_stdout(io.StringIO()):
-            wl.cmd_add(_NS(slug="general", type="note", ref="",
-                           at="2026-07-01T09:00", body="in the database"))
+        # A non-empty database is not clobbered without --force. The row goes in behind
+        # the CLI's back because the export above holds a good line the database does
+        # not, which is precisely what `wl add` now refuses to write over.
+        conn = wl.connect()
+        conn.execute("INSERT INTO entries(ts,slug,type,refs,body) VALUES(?,?,?,?,?)",
+                     ("2026-07-01T09:00:00", "general", "note", "", "in the database"))
+        conn.commit()
+        conn.close()
         try:
             wl.cmd_import(_NS(force=False))
             raise AssertionError("expected SystemExit on a non-empty database")
@@ -623,8 +627,8 @@ def test_export_refuses_to_shrink_an_existing_log():
 
     The count is what matters, not emptiness. A root that has work_log.md but no
     work_log.db is the common case now that the default root is XDG (a fresh machine, a
-    checkout carrying only the markdown), and the very next `wl add` used to rewrite a
-    five-entry file with the one entry it had just inserted, exit 0, and say nothing.
+    checkout carrying only the markdown), and `wl render` there used to replace a
+    five-entry file with the header alone, exit 0, and say nothing.
     """
     with worklog_root() as d:
         md = pathlib.Path(d, "work_log.md")
@@ -633,28 +637,117 @@ def test_export_refuses_to_shrink_an_existing_log():
                                 for i in range(5)))
         before = md.read_text()
         try:
-            wl.cmd_add(_NS(slug="general", type="note", ref="",
-                           at="2026-07-02T09:00", body="the sixth"))
-            raise AssertionError("expected SystemExit: the file holds more than the DB")
-        except SystemExit as ex:
-            assert "wl import" in str(ex.code), ex.code
-        assert md.read_text() == before
-        conn = wl.connect()
-        # The new row is safe: the database is the record, and it is the export that
-        # was refused.
-        assert len(wl._all_entries(conn)) == 1, wl._all_entries(conn)
-        # An empty database is the same failure one step further along.
-        conn.execute("DELETE FROM entries")
-        conn.commit()
-        try:
-            wl.export_md(conn)
+            wl.cmd_render(_NS())
             raise AssertionError("expected SystemExit: DB empty, file holds entries")
         except SystemExit as ex:
             assert "wl import" in str(ex.code), ex.code
         assert md.read_text() == before
-        # The one legitimate way to shrink the log (`wl rm`) opts in explicitly.
-        wl.export_md(conn, allow_shrink=True)
-        assert "entry 1" not in md.read_text()
+        # Adopt the file, and the same render is simply correct: equal counts never
+        # refuse, or the guard would make the tool unusable rather than safe.
+        with redirect_stdout(io.StringIO()):
+            wl.cmd_import(_NS(force=False))
+            wl.cmd_render(_NS())
+        assert "entry 4" in md.read_text()
+        # One line typed straight into the export is the same failure at full size:
+        # every other entry is in the database, so only the difference changes.
+        md.write_text(md.read_text() + "- 09:09 [note] typed into the file (refs: none)\n")
+        try:
+            wl.cmd_render(_NS())
+            raise AssertionError("expected SystemExit: the file holds one entry more")
+        except SystemExit as ex:
+            assert "wl import" in str(ex.code), ex.code
+        assert "typed into the file" in md.read_text()
+
+
+def test_a_single_add_cannot_destroy_a_one_entry_export():
+    """One entry in the export, none in the database: the first `wl add` must refuse.
+
+    The counts tie at one the instant the row is committed, so a guard that compares
+    after the insert sees a database that matches the file and overwrites it. The
+    original entry is then in neither copy, exit 0, nothing printed.
+    """
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text(f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n"
+                      "- 09:00 [note] ORIGINAL (refs: none)\n")
+        before = md.read_text()
+        raised = False
+        try:
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at="2026-07-02T09:00", body="the newcomer"))
+        except SystemExit as ex:
+            raised = True
+            assert "wl import" in str(ex.code), ex.code
+        if not raised:
+            raise AssertionError("the add overwrote an export the database did not hold")
+        assert md.read_text() == before, md.read_text()
+        # Nothing was written. A refusal that banks the row is what makes the counts
+        # tie on the next attempt, which is how the guard talks itself into the write.
+        conn = wl.connect()
+        assert wl._all_entries(conn) == [], wl._all_entries(conn)
+        conn.close()
+
+
+def test_adds_cannot_equalise_their_way_past_the_export_guard():
+    """Five entries in the export, none in the database: no number of adds may pass.
+
+    A guard that compares after the insert refuses adds one to four and commits each
+    row regardless. The fifth equalises the counts, passes, and takes all five original
+    entries with it.
+    """
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text(f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n"
+                      + "".join(f"- 09:0{i} [note] ORIGINAL {i} (refs: none)\n"
+                                for i in range(5)))
+        before = md.read_text()
+        assert before.count("ORIGINAL") == 5, before
+        for i in range(5):
+            raised = False
+            try:
+                with redirect_stdout(io.StringIO()):
+                    wl.cmd_add(_NS(slug="general", type="note", ref="",
+                                   at="2026-07-02T09:00", body=f"newcomer {i}"))
+            except SystemExit as ex:
+                raised = True
+                assert "wl import" in str(ex.code), ex.code
+            if not raised:
+                raise AssertionError(f"add {i} was allowed to overwrite the export")
+            assert md.read_text().count("ORIGINAL") == 5, f"after add {i}: {md.read_text()}"
+        assert md.read_text() == before, md.read_text()
+        conn = wl.connect()
+        assert wl._all_entries(conn) == [], wl._all_entries(conn)
+        conn.close()
+
+
+def test_an_unreadable_export_refuses_rather_than_tracebacks():
+    """Non-UTF-8 bytes in work_log.md must reach the user as a refusal, not a traceback.
+
+    The count check reads the file on every command that re-renders it, where the read
+    used to happen only against an empty database. An undecodable export made `wl add`
+    die with an unhandled UnicodeDecodeError, and because the row was committed first,
+    the export silently stopped tracking the database while the user got a stack trace.
+    """
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        md.write_bytes(f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n".encode()
+                       + b"- 09:00 [note] caf\xe9 (refs: none)\n")
+        before = md.read_bytes()
+        raised = False
+        try:
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at="2026-07-02T09:00", body="the newcomer"))
+        except SystemExit as ex:
+            raised = True
+            assert "cannot read" in str(ex.code), ex.code
+        if not raised:
+            raise AssertionError("expected SystemExit rather than a traceback")
+        assert md.read_bytes() == before
+        # Refused before the insert, so there is no committed row to explain away.
+        conn = wl.connect()
+        assert wl._all_entries(conn) == [], wl._all_entries(conn)
         conn.close()
 
 
@@ -708,9 +801,9 @@ def test_rm_removes_one_entry_and_updates_the_export():
 def test_rm_on_the_last_entry_empties_the_export():
     """Removing the only entry must succeed rather than be refused.
 
-    export_md's data-loss guard (Task 3) refuses to write an empty export over a
-    populated file unless allow_empty=True. `wl rm` is the one legitimate way to reach
-    a genuinely empty log, so cmd_rm must pass allow_empty=True, not the bare call.
+    The export guard refuses to overwrite a file holding entries the database does not.
+    `wl rm` passes it on its own merits rather than opting out: the check runs before
+    the DELETE, where both copies still hold the one entry.
     """
     with worklog_root() as d:
         wl.cmd_add(_NS(slug="general", type="note", ref="",
@@ -850,7 +943,9 @@ def test_import_refuses_to_shrink_the_database():
             wl.cmd_import(_NS(force=True))
             raise AssertionError("expected SystemExit: the file holds fewer entries")
         except SystemExit as ex:
-            assert "3" in str(ex.code), ex.code
+            # Not a bare "3": a tempdir path can hold one, and the assertion would
+            # then pass on any message at all.
+            assert "already holds 3" in str(ex.code), ex.code
         conn = wl.connect()
         assert len(wl._all_entries(conn)) == 3, wl._all_entries(conn)
         conn.close()

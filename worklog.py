@@ -349,30 +349,67 @@ def _roundtrip_key(e):
 
 # The invariant both copies are guarded by, in the two directions data moves:
 #
-#     No command reduces the entry count of either copy without an explicit opt-in.
+#     No command overwrites the export while the export holds entries the database
+#     does not.
 #
-# export_md carries it from the database to the export, cmd_import from the export to
-# the database. Both used to compare against what the parser could read rather than
-# against how much the other copy holds, which is how an empty database could shrink a
-# populated file, and a missing file could empty a populated database, both reporting
-# success. `wl rm` is the only opt-in: it is the one legitimate way to shrink the log.
+# check_export_not_ahead carries it from the database to the export, cmd_import from the
+# export to the database. Both used to compare against what the parser could read rather
+# than against how much the other copy holds, which is how an empty database could shrink
+# a populated file, and a missing file could empty a populated database, both reporting
+# success.
+#
+# The comparison then has to run before the command writes, so that both counts still
+# describe the same log. Asked from inside export_md it ran after the commit, blind by
+# exactly the rows just written: against a five-entry file and no database, four adds
+# were refused and committed their row anyway, and the fifth equalised the counts,
+# passed the check, and took all five original entries with it.
 def _count_exported_entries(path, over):
     """Entries in the export on disk, or 0 unless it holds more than `over` of them.
 
-    The count answers one question, "would this write shrink the file?", so it is
-    allowed to stop early on a no. An export holds at most one entry per line starting
-    with "- ", and that cheap count settles the ordinary path (a database that has just
-    gained the row it is about to export) without parsing a file of thousands of lines.
+    The count answers one question, "does the file hold entries the database does not?",
+    so it is allowed to stop early on a no. An export holds at most one entry per line
+    starting with "- ", and that cheap count settles the ordinary path (a database that
+    matches its export) without parsing a file of thousands of lines.
     """
     if not path.exists():
         return 0
-    text = path.read_text()
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        sys.exit(f"error: cannot read {path} ({e}); nothing was written. A file that "
+                 "cannot be read cannot be checked for entries the database is missing, "
+                 "and an unreadable export is exactly the shape that must not be "
+                 "overwritten. Move it aside and run `wl render` if the database is the "
+                 "copy to keep, or repair it and run `wl import`.")
     if text.count("\n- ") <= over:
         return 0
     return len(scan_markdown(text)[0])
 
 
-def export_md(conn, allow_shrink=False):
+def check_export_not_ahead(conn):
+    """Exit unless work_log.md can be replaced without losing entries the database lacks.
+
+    Every command that re-renders the export calls this before it writes anything, so a
+    refusal leaves both copies as they were and the reader still has a choice about
+    which one to keep.
+
+    A database that trails its own export is far more often a missing `work_log.db` (a
+    fresh XDG root, a checkout carrying only the markdown, a wiped file) than a real
+    deletion, and connect() no longer re-imports to recover from that.
+    """
+    n = conn.execute("SELECT count(*) FROM entries").fetchone()[0]
+    md = md_path()
+    exported = _count_exported_entries(md, over=n)
+    if exported > n:
+        plural = "y" if exported == 1 else "ies"
+        sys.exit(f"error: {md} holds {exported} entr{plural} but {db_path()} holds {n}; "
+                 "refusing to overwrite the export and lose the difference. Nothing was "
+                 "written. Rebuild the database from the export with `wl import` (which "
+                 f"needs --force once the database holds entries), or delete {md} and "
+                 "run `wl render` if the database is genuinely the copy to keep.")
+
+
+def export_md(conn):
     """Render every entry and atomically replace work_log.md, if it reads back intact.
 
     The export is derived, so a refused write costs a stale file rather than data. It is
@@ -380,20 +417,12 @@ def export_md(conn, allow_shrink=False):
     is rebuilt from: an export that cannot be read back is an export that cannot rescue
     anything.
 
-    Refuses to replace the file with one holding fewer entries unless allow_shrink=True.
-    A database that trails its own export is far more often a missing `work_log.db` (a
-    fresh XDG root, a checkout carrying only the markdown, a wiped file) than a real
-    deletion, and connect() no longer re-imports to recover from that.
+    Whether the file may be replaced at all is check_export_not_ahead's question, asked
+    by the command before it writes. This one only weighs the render against the rows it
+    came from.
     """
     entries = _all_entries(conn)
     target = md_path()
-    exported = 0 if allow_shrink else _count_exported_entries(target, over=len(entries))
-    if exported > len(entries):
-        sys.exit(f"error: {target} holds {exported} entries but the database holds "
-                 f"{len(entries)}; refusing to overwrite it and lose the difference. "
-                 "Rebuild the database from the file with `wl import` (add --force once "
-                 f"the database holds entries), or delete {target} and run `wl render` "
-                 "if the database is the copy to keep.")
     text = render_markdown(entries, known_slugs(conn))
     survived = set(map(_roundtrip_key, parse_markdown(text)))
     lost = sorted(k for k in map(_roundtrip_key, entries) if k not in survived)
@@ -424,6 +453,7 @@ def cmd_add(args):
     check_refs(refs)
     body = flatten_body(args.body)
     conn = connect()
+    check_export_not_ahead(conn)
     if args.slug not in known_slugs(conn):
         print(f"warning: unknown slug {args.slug!r} "
               f"(register it with `wl slug add {args.slug}`?)", file=sys.stderr)
@@ -442,8 +472,12 @@ def cmd_rm(args):
 
     No confirmation prompt: prompts break non-interactive callers, which is most of
     them here. Printing the entry is what makes a mistake recoverable, by eye.
+
+    Shrinking the log needs no opt-out of the export guard: that runs before the DELETE,
+    where the two copies still hold the same entries.
     """
     conn = connect()
+    check_export_not_ahead(conn)
     row = conn.execute("SELECT ts,slug,type,refs,body,id FROM entries WHERE id = ?",
                        (args.id,)).fetchone()
     if not row:
@@ -452,9 +486,7 @@ def cmd_rm(args):
     e = Entry(*row)
     conn.execute("DELETE FROM entries WHERE id = ?", (args.id,))
     conn.commit()
-    # allow_shrink=True: `wl rm` is the one legitimate way to make the log smaller, so
-    # it is the one caller that opts out of the guard above export_md.
-    export_md(conn, allow_shrink=True)
+    export_md(conn)
     conn.close()
     print(f"removed {e.id}: {e.ts[:16]} [{e.slug}] [{e.type}] {e.body} "
           f"(refs: {fmt_refs(e.refs)})")
@@ -489,6 +521,7 @@ def cmd_edit(args):
         sys.exit("error: nothing to change; pass at least one of "
                  "--slug, --type, --ref, --at, --body")
     conn = connect()
+    check_export_not_ahead(conn)
     if not conn.execute("SELECT 1 FROM entries WHERE id = ?", (args.id,)).fetchone():
         conn.close()
         sys.exit(f"error: no entry with id {args.id}")
@@ -644,6 +677,7 @@ def cmd_stats(args):
 
 def cmd_render(args):
     conn = connect()
+    check_export_not_ahead(conn)
     export_md(conn)
     conn.close()
     print(f"rendered {md_path()}")
