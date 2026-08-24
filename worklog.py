@@ -347,14 +347,27 @@ def _roundtrip_key(e):
     return (e.ts[:16], e.slug, e.type, e.refs, e.body)
 
 
-def _entry_listing(keys):
+_LISTING_LIMIT = 20
+
+
+def _entry_listing(keys, limit=_LISTING_LIMIT):
     """Round-trip keys as one indented line each: how every refusal names what is at stake.
 
     Sorted here rather than by the caller, so a refusal reads the same whichever set of
     keys produced it, and so a Counter's elements() can be handed over as-is.
+
+    Capped, because the commonest refusal is a missing work_log.db, where every entry in
+    the export is at stake: on a 1062-entry log the message was 1,079 lines and 106 KB on
+    the stderr of a plain `wl add`, and one the reader cannot see is worth no more than
+    the count it replaced. Never a silent cap; the tail says what was withheld, the way
+    `wl log` does.
     """
-    return "\n".join(f"  {ts} [{slug}] [{typ}] {body[:60]}"
-                     for ts, slug, typ, _, body in sorted(keys))
+    ordered = sorted(keys)
+    lines = [f"  {ts} [{slug}] [{typ}] {body[:60]}"
+             for ts, slug, typ, _, body in ordered[:limit]]
+    if len(ordered) > limit:
+        lines.append(f"  ... and {len(ordered) - limit} more")
+    return "\n".join(lines)
 
 
 # The invariant both copies are guarded by, in the two directions data moves:
@@ -369,15 +382,24 @@ def _entry_listing(keys):
 # wrong in both directions: equal counts said nothing about a line rewritten in place,
 # and a file behind on count still destroyed an entry the database had never held.
 #
+# A line that looks like an entry and does not parse counts as an entry here. It is in
+# neither copy's identities, so comparing identities alone always calls it safe to
+# overwrite, which is how a typo in a hand-edit deleted the line it was typed into.
+#
 # The comparison has to run before the command writes, so that both copies still describe
 # the same log. Asked from inside export_md it ran after the commit, blind by exactly the
 # rows just written: against a five-entry file and no database, four adds were refused and
 # committed their row anyway, and the fifth equalised the counts, passed the check, and
 # took all five original entries with it.
 def _exported_keys(path):
-    """Round-trip keys of every entry in the export on disk. Empty when there is none."""
+    """Round-trip keys of the entries in the export, and the lines that are neither.
+
+    Returns (Counter, skipped), skipped in scan_markdown's [(lineno, line)] shape. The
+    dropped lines are the caller's business here: a line the parser cannot read is not in
+    the Counter, so on its own the Counter says the export does not hold it.
+    """
     if not path.exists():
-        return Counter()
+        return Counter(), []
     try:
         text = path.read_text()
     except (OSError, UnicodeDecodeError) as e:
@@ -386,11 +408,16 @@ def _exported_keys(path):
                  "and an unreadable export is exactly the shape that must not be "
                  "overwritten. Move it aside and run `wl render` if the database is the "
                  "copy to keep, or repair it and run `wl import`.")
-    return Counter(map(_roundtrip_key, parse_markdown(text)))
+    entries, skipped = scan_markdown(text)
+    return Counter(map(_roundtrip_key, entries)), skipped
 
 
 def check_export_not_ahead(conn):
-    """Exit unless work_log.md can be replaced without losing entries the database lacks.
+    """Exit unless work_log.md can be replaced without losing what only it holds.
+
+    Two ways it can be ahead: an entry the database does not hold, and a line that looks
+    like an entry and does not parse, which is an entry to the person who typed it and to
+    nobody else. Both refuse.
 
     Every command that re-renders the export calls this before it writes anything, so a
     refusal leaves both copies as they were and the reader still has a choice about
@@ -404,7 +431,21 @@ def check_export_not_ahead(conn):
     # reads can only make `current` larger, which is the permissive direction, and those
     # rows are really committed. Reading the database first biases the other way, and
     # spuriously refuses the concurrent add's own re-render.
-    exported = _exported_keys(md_path())
+    exported, skipped = _exported_keys(md_path())
+    # Before the orphan comparison, and refusing rather than reporting: a line the parser
+    # drops is missing from `exported`, so the comparison reads it as an entry the file
+    # does not hold and the render deletes it. It also makes the orphan listing below a
+    # partial account of what the write would destroy. cmd_import refuses the same shape
+    # coming the other way; this side used to be the lenient one.
+    if skipped:
+        for lineno, line in skipped[:_LISTING_LIMIT]:
+            print(f"warning: line {lineno} not read: {line[:90]}", file=sys.stderr)
+        if len(skipped) > _LISTING_LIMIT:
+            print(f"... and {len(skipped) - _LISTING_LIMIT} more", file=sys.stderr)
+        sys.exit(f"error: {md_path()} has {len(skipped)} line(s) that look like entries "
+                 "and do not parse. Nothing was written; this command rewrites the export "
+                 "from the database, which would take those lines with it. Fix them in "
+                 f"work_log.md, or delete {md_path()} and run `wl render` to discard them.")
     current = Counter(map(_roundtrip_key, _all_entries(conn)))
     # A multiset difference, so two byte-identical entries stay two entries: a set would
     # call an export holding the line twice equal to a database holding it once.
@@ -412,8 +453,11 @@ def check_export_not_ahead(conn):
     if orphans:
         n = sum(orphans.values())
         plural = "y" if n == 1 else "ies"
-        sys.exit(f"error: {md_path()} holds {n} entr{plural} that {db_path()} does not. "
-                 "Nothing was written; overwriting the export would lose:\n"
+        # "cannot account for", not "does not hold": against two identical rows an
+        # export holding three copies leaves one orphan, and the database does hold that
+        # line. A reader who greps the wording has to find something really missing.
+        sys.exit(f"error: {md_path()} holds {n} entr{plural} that {db_path()} cannot "
+                 "account for. Nothing was written; overwriting the export would lose:\n"
                  f"{_entry_listing(orphans.elements())}\n"
                  "Rebuild the database from the export with `wl import` (which needs "
                  "--force once the database holds entries) to keep the difference, or "
@@ -739,8 +783,8 @@ def cmd_import(args):
         map(_roundtrip_key, entries))
     if dropped:
         gone = sum(dropped.values())
-        print(f"dropping {gone} entr{'y' if gone == 1 else 'ies'} {db_path()} holds and "
-              f"{md} does not:\n{_entry_listing(dropped.elements())}")
+        print(f"dropping {gone} entr{'y' if gone == 1 else 'ies'} {md} cannot account "
+              f"for:\n{_entry_listing(dropped.elements())}")
     imported = _import_into(conn, entries)
     conn.close()
     print(f"imported {md} -> {db_path()} ({imported} entries)")

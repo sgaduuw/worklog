@@ -804,6 +804,101 @@ def test_an_export_behind_on_count_can_still_hold_an_orphan():
         conn.close()
 
 
+def test_a_line_the_parser_cannot_read_is_refused():
+    """A typed line the parser drops must refuse the write, not be overwritten in silence.
+
+    The guard compares what parse_markdown could read back, so a line it cannot read is
+    absent from the comparison entirely: it looks like an entry the export does not hold,
+    and the next render deletes it, exit 0. `wl import` refuses exactly this shape in the
+    other direction, so the lenient side of the invariant was the one destroying data.
+    """
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        for i in range(2):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="",
+                               at=f"2026-07-01T09:0{i}", body=f"entry {i}"))
+        clean = md.read_text()
+        # Three shapes a person actually types. None of them parse, and in all three the
+        # entries that do parse are a subset of the database, so nothing but the skipped
+        # line can be what refuses.
+        shapes = {
+            # The export renders newest day first, so the top of the file is where a
+            # person types, and the top is above every `## day` heading.
+            "above the first day heading":
+                clean.replace(wl.HEADER_BLOCK,
+                              f"{wl.HEADER_BLOCK}\n\n- 09:09 [note] TYPED IN BY HAND"),
+            "a new day whose slug heading was forgotten":
+                clean.replace("## 2026-07-01",
+                              "## 2026-07-02\n\n- 09:09 [note] TYPED IN BY HAND\n\n"
+                              "## 2026-07-01", 1),
+            "an edit that breaks the shape rather than the wording":
+                clean.replace("- 09:01 [note] entry 1", "- 09:01 note] TYPED IN BY HAND"),
+        }
+        for name, text in shapes.items():
+            md.write_text(text)
+            before = md.read_text()
+            raised, err = False, io.StringIO()
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    wl.cmd_add(_NS(slug="general", type="note", ref="",
+                                   at="2026-07-02T10:00", body="the newcomer"))
+            except SystemExit as ex:
+                raised = True
+                assert "not parse" in str(ex.code), (name, ex.code)
+                # Named by line, the way `wl import` names them: "one line" is not
+                # something the reader can go and fix.
+                assert "TYPED IN BY HAND" in err.getvalue(), (name, err.getvalue())
+            if not raised:
+                raise AssertionError(f"the add destroyed a line the parser skipped: {name}")
+            assert md.read_text() == before, (name, md.read_text())
+            conn = wl.connect()
+            assert len(wl._all_entries(conn)) == 2, (name, wl._all_entries(conn))
+            conn.close()
+        # Known-positive is only half of it: a tool-generated export must still pass,
+        # including the punctuation the entry regex cares about, or the check is a
+        # tool-wide refusal rather than a guard.
+        md.unlink()
+        for body in ("brackets [like] this: and a colon",
+                     "a body that ends in a ref (refs: FM-1)",
+                     "- a dash starting the body"):
+            with redirect_stdout(io.StringIO()):
+                wl.cmd_add(_NS(slug="general", type="note", ref="FM-9",
+                               at="2026-07-03T09:00", body=body))
+        entries, skipped = wl.scan_markdown(md.read_text())
+        assert skipped == [], skipped
+        assert len(entries) == 5, entries
+
+
+def test_a_long_refusal_listing_is_capped():
+    """The listing has to fit on a screen, because its usual trigger is the whole log.
+
+    A missing work_log.db makes every entry in the export an orphan, so on the real log
+    this refusal was 1,079 lines and 106 KB on the stderr of a plain `wl add`. A reader
+    who cannot see the message cannot act on it, which is the only reason to list the
+    entries instead of counting them.
+    """
+    with worklog_root() as d:
+        md = pathlib.Path(d, "work_log.md")
+        md.write_text(f"{wl.HEADER_BLOCK}\n\n## 2026-07-01\n\n### general\n"
+                      + "".join(f"- 09:{i:02d} [note] entry {i:02d} (refs: none)\n"
+                                for i in range(30)))
+        before = md.read_text()
+        try:
+            wl.cmd_render(_NS())
+            raise AssertionError("expected SystemExit: 30 entries the database lacks")
+        except SystemExit as ex:
+            msg = str(ex.code)
+        listed = [ln for ln in msg.splitlines() if ln.startswith("  2026-07-01T")]
+        assert len(listed) == 20, msg
+        # Never a silent cap, and the count is still the full one: the tail says what
+        # was withheld, the way `wl log` does.
+        assert "... and 10 more" in msg, msg
+        assert "holds 30 entries" in msg, msg
+        assert len(msg.splitlines()) <= 26, len(msg.splitlines())
+        assert md.read_text() == before, md.read_text()
+
+
 def test_identical_entries_are_not_collapsed_by_the_guard():
     """Two byte-identical entries are two entries on both sides of the comparison.
 
@@ -834,7 +929,11 @@ def test_identical_entries_are_not_collapsed_by_the_guard():
             raise AssertionError("expected SystemExit: the third copy is in the file alone")
         except SystemExit as ex:
             assert "the same thing twice" in str(ex.code), ex.code
+            # "cannot account for", not "does not hold": the database holds this line
+            # twice, just not three times, and a reader who greps the wording for a
+            # missing entry has to find one that is really missing.
             assert "holds 1 entry" in str(ex.code), ex.code
+            assert "cannot account for" in str(ex.code), ex.code
         assert md.read_text() == before, md.read_text()
 
 
