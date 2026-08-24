@@ -75,6 +75,17 @@ changes the diff happens after a review is requested.
   version history of its own. The export is derived now, not the source of record, so
   do not verify against the live log: that would mean running the rescue path
   (`wl import --force`) against the one database that matters. Before tagging any
-  change to `parse_markdown` or the `render_*` functions, run `wl render` then
-  `wl import --force` into a scratch `WORKLOG_ROOT`, and compare the entry count
-  before and after.
+  change to `parse_markdown` or the `render_*` functions, verify against a copy:
+
+  ```sh
+  D=$(mktemp -d)
+  cp "${WORKLOG_ROOT:-$HOME/.local/share/worklog}/work_log.md" "$D/"
+  WORKLOG_ROOT=$D python3 wl import          # note the entry count
+  WORKLOG_ROOT=$D python3 wl render
+  WORKLOG_ROOT=$D python3 wl import --force  # must print the same count
+  rm -rf "$D"
+  ```
+
+  Both counts must equal the live log's, and neither run may report a dropped line.
+  The `cp` is the whole check: without it the scratch root holds nothing, both counts
+  are zero, and the recipe passes no matter what the renderer does.

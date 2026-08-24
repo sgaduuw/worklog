@@ -126,8 +126,8 @@ Change a field with `wl edit`, using the id shown by `wl log`:
 
 Pass any of `--slug`, `--type`, `--ref`, `--at`, `--body`; only the fields you pass
 change, and the same validation as `wl add` applies, so an edit cannot write what
-`add` would have refused. Remove an entry with `wl rm`, which prints it in full
-first, so a mistake is recoverable by eye:
+`add` would have refused. Remove an entry with `wl rm`, which prints it in full, so a
+mistake is recoverable by eye:
 
 ```sh
 ./wl rm 42
@@ -137,9 +137,16 @@ first, so a mistake is recoverable by eye:
 is rewritten from the database on every `wl add`, `wl edit`, `wl rm` and `wl render`,
 overwriting any change made only in the file. `wl import` exists to rebuild
 `work_log.db` from `work_log.md`; it is a rescue tool for a lost or corrupted
-database, not part of the normal loop. It refuses to run against a database that
-already holds entries unless you pass `--force`, refuses before deleting anything if
-a line in the file cannot be parsed, and reports every line it could not read.
+database, not part of the normal loop.
+
+No command makes either copy smaller without being told to. `wl import` refuses a
+database that already holds entries unless you pass `--force`, and refuses, before
+deleting anything, a missing `work_log.md`, a file that reads back as fewer entries
+than the database already holds, and a file with a line that looks like an entry and
+does not parse, reporting every such line. In the other direction, an export is
+refused rather than written when the file on disk holds more entries than the
+database, which is what a root holding the markdown but no `work_log.db` looks like.
+`wl rm` is the one command that may shrink the log.
 
 ## Searching
 
@@ -203,7 +210,10 @@ as are weekdays and hours that saw no entries.
 `worklog-healthcheck.sh` is a shell snippet you can wire into a shell startup or
 an editor session hook. It warns if the tool is missing/broken or if
 `work_log.md` has not changed in 5+ days, so silent logging failures surface
-early. Uses BSD `stat` (macOS); adjust for GNU `stat` on Linux.
+early. It finds the log the way `wl` does (`WORKLOG_ROOT`, else
+`$XDG_DATA_HOME/worklog`, else `~/.local/share/worklog`); the path to `wl` itself is
+a literal at the top of the script, so point it at your checkout. Uses BSD `stat`
+(macOS); adjust for GNU `stat` on Linux.
 
 ## Tests
 
@@ -220,11 +230,31 @@ the ruff version in `ci.yml`, so the gate is the same on any machine.
 Grouped by milestone; see `git log` for the full commit-level detail, and
 `RELEASING.md` for how a version gets cut.
 
-- **0.5 (unreleased; no `v0.5` tag yet)** `wl stats`: counts by type, slug, ISO week and ref, `--when` for weekday
-  and hour. `wl log` shows the newest 20 by default (`-n`, `-n 0` for all) and exits
-  quietly on a closed pipe. `--ref` also matches ticket keys named only in an entry
-  body. The markdown round trip is verified before the file is replaced, and slugs or
-  refs that would not survive it are refused at `add`.
+- **0.5 (unreleased; no `v0.5` tag yet)** The storage inversion, plus the stats and
+  search work that preceded it.
+  - `work_log.db` is the source of record and `work_log.md` a generated export, never
+    read back during normal operation. Hand-edits to the markdown are overwritten.
+    Change entries with `wl edit` and delete them with `wl rm`, naming them by the id
+    `wl log` now prints.
+  - `wl import` is an explicit rescue path rather than a sync. It rebuilds the database
+    from the export, refuses a database that already holds entries without `--force`,
+    and refuses a missing file, a file that reads back as fewer entries than the
+    database holds, or a line that looks like an entry and does not parse.
+  - No command makes either copy smaller without being told to: an export that would
+    hold fewer entries than the file already on disk is refused, and `wl rm` is the one
+    command that may shrink the log.
+  - The schema carries a `PRAGMA user_version` stamp and migrates in place, since the
+    database can no longer be rebuilt by deleting it.
+  - **Upgrading from 0.4 or earlier:** the default root moved from the directory holding
+    the tool to `$XDG_DATA_HOME/worklog`, falling back to `~/.local/share/worklog`. Set
+    `WORKLOG_ROOT` to your old directory, or move `work_log.md` and `work_log.db` into
+    the new root. `wl` warns when it finds a log at the old location and starts an empty
+    one rather than moving anything.
+  - `wl stats`: counts by type, slug, ISO week and ref, `--when` for weekday and hour.
+    `wl log` shows the newest 20 by default (`-n`, `-n 0` for all) and exits quietly on
+    a closed pipe. `--ref` also matches ticket keys named only in an entry body. The
+    markdown round trip is verified before the file is replaced, and slugs or refs that
+    would not survive it are refused at `add`.
 - **0.4** Hardening: `--at` now rejects impossible values (`99:99`, month 13)
   instead of storing garbage; test coverage extended to every logic branch;
   internal dedupe (ref formatting, test setup).
