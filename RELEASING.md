@@ -1,9 +1,16 @@
-<!-- process-version: 2 -->
+<!-- process-version: 3 -->
 # Releasing worklog
 
-Derived from [Release process](https://i3dnet.atlassian.net/wiki/spaces/METAL/pages/1766227974),
-process version 2. That page is the source of truth and wins on any disagreement. This
-file carries the repo-specific parts and the places worklog genuinely cannot follow it.
+Derived from META's [release process](https://github.com/i3dnet/meta-release-process),
+process version 3. That repo is the source of truth and wins on any disagreement, and its
+`main` is always the current process. This file carries the repo-specific parts and the
+places worklog genuinely cannot follow it.
+
+Neither version 2 nor version 3 changed anything this file states. Version 3 rewrote the
+process's step 3, because a push to a feature branch starts no CI run there; here CI is
+`on: [push, pull_request]`, so pushing does start one. Version 3 also ruled out changelog
+placeholders, and this repo has no `CHANGELOG.md`. The marker moved because the file was
+checked against both, not because text changed.
 
 ## Where this repo deviates, deliberately
 
@@ -42,7 +49,8 @@ changes the diff happens after a review is requested.
 
 ## Cutting a release
 
-1. Compare this file's `process-version` marker against the page. They must match.
+1. Compare this file's `process-version` marker against `RELEASE-PROCESS.md` in the
+   process repo. They must match.
 2. `ruff check . && python3 test_wl.py` on `main`, both clean.
 3. `/ponytail-audit` over the repo. Surface the findings, do not auto-apply, and do not
    let cosmetic ones block a release.
